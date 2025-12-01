@@ -3,7 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var manager = ProxyManager()
     @State private var showingConfigEditor = false
-    @State private var editingConfig: ProxyConfig?
+    @State private var editingConfig: ProxyConfig? = nil
     @State private var showingLogs = false
     
     var body: some View {
@@ -25,7 +25,9 @@ struct ContentView: View {
                             onSelect: { manager.switchConfig(config) },
                             onEdit: {
                                 editingConfig = config
-                                showingConfigEditor = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    showingConfigEditor = true
+                                }
                             },
                             onDelete: { manager.deleteConfig(config) }
                         )
@@ -50,22 +52,17 @@ struct ContentView: View {
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .sheet(isPresented: $showingConfigEditor) {
-            // 只有当 editingConfig 存在时才显示编辑器
-            if let config = editingConfig {
-                ConfigEditor(
-                    config: config,
-                    onSave: { newConfig in
-                        manager.saveConfig(newConfig)
-                        showingConfigEditor = false
-                        editingConfig = nil
-                    },
-                    onCancel: {
-                        showingConfigEditor = false
-                        editingConfig = nil
-                    }
-                )
-            }
+        .sheet(item: $editingConfig) { config in
+            ConfigEditor(
+                config: config,
+                onSave: { newConfig in
+                    manager.saveConfig(newConfig)
+                    editingConfig = nil
+                },
+                onCancel: {
+                    editingConfig = nil
+                }
+            )
         }
         .sheet(isPresented: $showingLogs) {
             LogsView(logs: manager.logs)
@@ -74,7 +71,7 @@ struct ContentView: View {
     }
     
     private func createNewConfig() {
-        editingConfig = ProxyConfig(
+        let newConfig = ProxyConfig(
             name: "新配置",
             sniHost: "example.com",
             path: "/ws",
@@ -83,10 +80,8 @@ struct ContentView: View {
             httpPort: 1081,
             preSharedKey: ""
         )
-        // 使用 DispatchQueue 确保状态更新完成后再显示
-        DispatchQueue.main.async {
-            showingConfigEditor = true
-        }
+        // 直接设置 editingConfig，触发 sheet(item:) 自动显示
+        editingConfig = newConfig
     }
 }
 
