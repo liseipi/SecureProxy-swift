@@ -1,3 +1,4 @@
+// ViewModels/ProxyManager.swift
 import Foundation
 import Combine
 
@@ -40,20 +41,12 @@ class ProxyManager: ObservableObject {
     }
     
     private func findPython() -> String {
-        // 优先级顺序：
-        // 1. pyenv Python (如果用户使用 pyenv)
-        // 2. Homebrew Python
-        // 3. 系统 Python
+        // 优先级顺序
         let paths = [
-            // pyenv Python (通过 shell 环境获取)
             shell("which python3"),
-            // pyenv 全局 Python
             "\(NSHomeDirectory())/.pyenv/shims/python3",
-            // Homebrew ARM Mac
             "/opt/homebrew/bin/python3",
-            // Homebrew Intel Mac
             "/usr/local/bin/python3",
-            // 系统 Python
             "/usr/bin/python3"
         ]
         
@@ -61,7 +54,6 @@ class ProxyManager: ObservableObject {
         for path in paths {
             let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedPath.isEmpty && fm.fileExists(atPath: trimmedPath) {
-                // 验证这个 Python 是否有所需的依赖
                 if checkPythonDependencies(pythonPath: trimmedPath) {
                     addLog("✅ 找到可用的 Python: \(trimmedPath)")
                     return trimmedPath
@@ -85,7 +77,6 @@ class ProxyManager: ObservableObject {
         task.executableURL = URL(fileURLWithPath: "/bin/zsh")
         task.standardInput = nil
         
-        // 设置环境变量，确保能找到 pyenv
         var environment = ProcessInfo.processInfo.environment
         if let home = environment["HOME"] {
             let pyenvRoot = "\(home)/.pyenv"
@@ -110,8 +101,6 @@ class ProxyManager: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: pythonPath)
         task.arguments = ["-c", "import cryptography, websockets"]
-        
-        // 继承当前环境变量
         task.environment = ProcessInfo.processInfo.environment
         
         do {
@@ -130,19 +119,12 @@ class ProxyManager: ObservableObject {
         
         for file in pythonFiles {
             let destPath = pythonDirectory.appendingPathComponent(file)
-            
-            // 删除旧文件
             try? fm.removeItem(at: destPath)
             
-            // 尝试多个可能的源路径
             let possiblePaths = [
-                // 1. Bundle 的 Python 子目录
                 Bundle.main.resourceURL?.appendingPathComponent("Python").appendingPathComponent(file),
-                // 2. Bundle 根目录
                 Bundle.main.resourceURL?.appendingPathComponent(file),
-                // 3. Bundle.main.path 方式
                 Bundle.main.path(forResource: file.replacingOccurrences(of: ".py", with: ""), ofType: "py", inDirectory: "Python").map { URL(fileURLWithPath: $0) },
-                // 4. 直接在 Bundle 根
                 Bundle.main.path(forResource: file.replacingOccurrences(of: ".py", with: ""), ofType: "py").map { URL(fileURLWithPath: $0) }
             ].compactMap { $0 }
             
@@ -151,7 +133,7 @@ class ProxyManager: ObservableObject {
                 if fm.fileExists(atPath: sourcePath.path) {
                     do {
                         try fm.copyItem(at: sourcePath, to: destPath)
-                        addLog("✅ 复制: \(file) 从 \(sourcePath.lastPathComponent)")
+                        addLog("✅ 复制: \(file)")
                         copiedCount += 1
                         copied = true
                         break
@@ -168,31 +150,8 @@ class ProxyManager: ObservableObject {
         
         if copiedCount == 0 {
             addLog("⚠️ 警告: 未能复制任何 Python 文件")
-            addLog("解决方案: 请手动复制文件到:")
-            addLog("  \(pythonDirectory.path)")
         } else {
             addLog("✅ 复制完成: \(copiedCount)/3 个文件")
-        }
-        
-        // 打印调试信息
-        if let resourcePath = Bundle.main.resourcePath {
-            addLog("📁 Bundle 路径: \(resourcePath)")
-            
-            // 列出 Bundle 中的 Python 文件
-            if let items = try? fm.contentsOfDirectory(atPath: resourcePath) {
-                let pyFiles = items.filter { $0.hasSuffix(".py") }
-                if !pyFiles.isEmpty {
-                    addLog("📄 Bundle 中的 .py 文件: \(pyFiles.joined(separator: ", "))")
-                }
-            }
-            
-            // 检查 Python 子目录
-            let pythonSubDir = resourcePath + "/Python"
-            if fm.fileExists(atPath: pythonSubDir) {
-                if let items = try? fm.contentsOfDirectory(atPath: pythonSubDir) {
-                    addLog("📂 Python 目录内容: \(items.joined(separator: ", "))")
-                }
-            }
         }
     }
     
@@ -266,11 +225,22 @@ class ProxyManager: ObservableObject {
         guard !isRunning else { return }
         
         status = .connecting
-        addLog("启动代理...")
+        addLog("🚀 启动代理...")
         
-        // 创建临时配置文件供 Python 脚本使用
+        // 启动前先清理
+        addLog("🧹 清理残留进程...")
+        killAllClientProcesses()
+        releasePort(config.socksPort)
+        releasePort(config.httpPort)
+        
+        // 延迟启动，确保端口完全释放
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.startProxyProcess(config: config)
+        }
+    }
+    
+    private func startProxyProcess(config: ProxyConfig) {
         let tempConfigPath = createTempConfig(config: config)
-        
         let scriptPath = pythonDirectory.appendingPathComponent("client.py").path
         
         process = Process()
@@ -278,18 +248,13 @@ class ProxyManager: ObservableObject {
         process?.arguments = [scriptPath]
         process?.currentDirectoryURL = pythonDirectory
         
-        // 继承并扩展环境变量（不要清空任何变量！）
         var environment = ProcessInfo.processInfo.environment
-        
-        // 设置配置文件路径
         environment["SECURE_PROXY_CONFIG"] = tempConfigPath
         
-        // 确保 Python 路径正确
         if let home = environment["HOME"] {
             let pyenvRoot = "\(home)/.pyenv"
             let currentPath = environment["PATH"] ?? ""
             
-            // 添加 pyenv 路径到 PATH
             var pathComponents = [
                 "\(pyenvRoot)/shims",
                 "\(pyenvRoot)/bin",
@@ -298,7 +263,6 @@ class ProxyManager: ObservableObject {
                 "/bin"
             ]
             
-            // 保留现有路径中不重复的部分
             for component in currentPath.split(separator: ":") {
                 let path = String(component)
                 if !pathComponents.contains(path) {
@@ -310,17 +274,9 @@ class ProxyManager: ObservableObject {
             environment["PYENV_ROOT"] = pyenvRoot
         }
         
-        // 设置 Python 缓冲模式为无缓冲，确保实时输出
         environment["PYTHONUNBUFFERED"] = "1"
-        
-        // ⚠️ 不要清空 SSL 变量！保持系统默认值
-        // 注释掉这两行：
-        // environment["SSL_CERT_FILE"] = ""
-        // environment["REQUESTS_CA_BUNDLE"] = ""
-        
         process?.environment = environment
         
-        // 日志输出环境信息
         addLog("🐍 Python: \(pythonPath)")
         addLog("📂 工作目录: \(pythonDirectory.path)")
         addLog("📄 配置: \(config.name)")
@@ -362,7 +318,6 @@ class ProxyManager: ObservableObject {
     }
     
     private func createTempConfig(config: ProxyConfig) -> String {
-        // 在 Python 脚本目录创建临时配置文件
         let configDir = pythonDirectory.appendingPathComponent("config")
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         
@@ -387,13 +342,110 @@ class ProxyManager: ObservableObject {
     }
     
     func stop() {
-        process?.terminate()
+        addLog("🛑 停止代理...")
+        
+        // 1. 终止当前进程
+        if let process = process {
+            process.terminate()
+            
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+            }
+            
+            // 强制杀死
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                // 👇 将此行修改为直接 if 检查
+                let pid = process.processIdentifier // processIdentifier 是 Int32，不是 Optional
+                if pid > 0 {
+                    // 由于 processIdentifier 是 Int32 类型，kill 函数需要 pid_t (也是 Int32)
+                    kill(pid, SIGKILL)
+                    // 您也可以写成：kill(process.processIdentifier, SIGKILL)
+                }
+            }
+        }
+        
+        // 2. 清理所有相关进程
+        killAllClientProcesses()
+        
+        // 3. 释放端口
+        if let config = activeConfig {
+            releasePort(config.socksPort)
+            releasePort(config.httpPort)
+        }
+        
+        // 4. 重置状态
         process = nil
         isRunning = false
         status = .disconnected
         trafficUp = 0
         trafficDown = 0
-        addLog("代理已停止")
+        
+        addLog("✅ 代理已停止")
+    }
+    
+    private func killAllClientProcesses() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-f", "client.py"]
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            
+            if task.terminationStatus == 0 {
+                addLog("🔪 已清理残留进程")
+            }
+        } catch {
+            // 失败不影响主流程
+        }
+    }
+    
+    private func releasePort(_ port: Int) {
+        let task = Process()
+        let pipe = Pipe()
+        
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        task.arguments = ["-ti", ":\(port)"]
+        task.standardOutput = pipe
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
+                let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .components(separatedBy: .newlines)
+                    .compactMap { Int($0) }
+                
+                for pid in pids {
+                    kill(pid_t(pid), SIGKILL)
+                    addLog("🔪 释放端口 \(port) (PID: \(pid))")
+                }
+            }
+        } catch {
+            // 失败不影响主流程
+        }
+    }
+    
+    func forceCleanup() {
+        addLog("🧹 开始强制清理...")
+        
+        killAllClientProcesses()
+        
+        if let config = activeConfig {
+            releasePort(config.socksPort)
+            releasePort(config.httpPort)
+        }
+        
+        releasePort(1080)
+        releasePort(1081)
+        
+        process = nil
+        isRunning = false
+        status = .disconnected
+        
+        addLog("✅ 清理完成")
     }
     
     private func parseOutput(_ output: String) {
@@ -418,7 +470,7 @@ class ProxyManager: ObservableObject {
     private func addLog(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         logs.append("[\(timestamp)] \(message)")
-        if logs.count > 500 {  // 增加到 500 条
+        if logs.count > 500 {
             logs.removeFirst()
         }
     }
@@ -429,7 +481,11 @@ class ProxyManager: ObservableObject {
     }
     
     deinit {
+        killAllClientProcesses()
+        if let config = activeConfig {
+            releasePort(config.socksPort)
+            releasePort(config.httpPort)
+        }
         timer?.invalidate()
-        stop()
     }
 }
