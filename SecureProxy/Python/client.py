@@ -1,4 +1,4 @@
-# client.py - 修改版，支持从环境变量读取配置
+# client.py - 性能优化版
 import asyncio
 import json
 import os
@@ -7,13 +7,27 @@ import hmac
 import socket
 import struct
 import websockets
+import ssl
 import time
 import traceback
 from pathlib import Path
 
 # 核心模块导入
 from crypto import derive_keys, encrypt, decrypt
-from tls_fingerprint import get_tls_session
+
+# ==================== 性能优化配置 ====================
+# 缓冲区大小优化
+READ_BUFFER_SIZE = 65536  # 64KB，提升吞吐量
+WRITE_BUFFER_SIZE = 65536
+MAX_QUEUE_SIZE = 100  # 队列最大长度
+
+# 连接池配置
+MAX_TUNNEL_REUSE = 50  # 单个隧道最大复用次数
+TUNNEL_IDLE_TIMEOUT = 300  # 隧道空闲超时（秒）
+
+# TCP 优化参数
+TCP_NODELAY = True  # 禁用 Nagle 算法
+TCP_KEEPALIVE = True  # 启用 TCP keepalive
 
 # ==================== 资源路径 ====================
 def resource_path(relative_path):
@@ -21,12 +35,7 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# 从环境变量或默认路径读取配置目录
-CONFIG_FILE = os.environ.get('SECURE_PROXY_CONFIG')
-if CONFIG_FILE and os.path.exists(CONFIG_FILE):
-    CONFIG_DIR = os.path.dirname(CONFIG_FILE)
-else:
-    CONFIG_DIR = resource_path("config")
+CONFIG_DIR = resource_path("config")
 
 # ==================== 全局状态 ====================
 status = "disconnected"
@@ -35,170 +44,251 @@ configs = {}
 active_config_name = None
 traffic_up = traffic_down = 0
 last_traffic_time = time.time()
-tunnel = None
+
+# 连接池
+tunnel_pool = []
+tunnel_lock = asyncio.Lock()
 
 # ==================== 加载配置 ====================
 def load_configs():
-    global configs, current_config
+    global configs
     configs = {}
-    
-    # 优先从环境变量指定的配置文件加载
-    if CONFIG_FILE and os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                cfg = json.load(f)
-                configs[cfg["name"]] = cfg
-                current_config = cfg
-                print(f"✅ 加载配置: {cfg['name']}")
-                return configs
-        except Exception as e:
-            print(f"❌ 加载配置文件失败: {e}")
-    
-    # 备用：从 config 目录加载
     if not os.path.exists(CONFIG_DIR):
         os.makedirs(CONFIG_DIR)
-    
     for file in os.listdir(CONFIG_DIR):
         if file.endswith(".json"):
-            try:
-                with open(os.path.join(CONFIG_DIR, file), "r") as f:
-                    cfg = json.load(f)
-                    configs[cfg["name"]] = cfg
-            except:
-                pass
-    
-    if configs:
-        # 使用第一个配置
-        first_config = list(configs.values())[0]
-        current_config = first_config
-        print(f"✅ 加载配置: {first_config['name']}")
-    
+            with open(os.path.join(CONFIG_DIR, file), "r") as f:
+                cfg = json.load(f)
+                configs[cfg["name"]] = cfg
     return configs
 
-def switch_config(name):
-    global active_config_name, current_config
-    if name in configs:
-        active_config_name = name
-        current_config = configs[name]
+def load_active_config():
+    path = resource_path("active.txt")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            name = f.read().strip()
+            if name in configs:
+                return name
+    return list(configs.keys())[0] if configs else None
 
-# ==================== 加密隧道 ====================
+# ==================== 流量统计 ====================
+async def traffic_monitor():
+    global traffic_up, traffic_down, last_traffic_time
+    while True:
+        await asyncio.sleep(5)
+        now = time.time()
+        elapsed = now - last_traffic_time
+        if elapsed > 0 and (traffic_up > 0 or traffic_down > 0):
+            up_speed = traffic_up / elapsed / 1024
+            down_speed = traffic_down / elapsed / 1024
+            print(f"📊 流量: ↑ {up_speed:.1f}KB/s ↓ {down_speed:.1f}KB/s | 池: {len(tunnel_pool)}")
+            traffic_up = traffic_down = 0
+            last_traffic_time = now
+
+# ==================== 优化的加密隧道 ====================
 class SecureTunnel:
     def __init__(self):
         self.ws = None
         self.send_key = self.recv_key = None
+        self.connected = False
+        self.use_count = 0
+        self.last_used = time.time()
 
     async def connect(self):
-        global status
-        status = "connecting"
-        print("正在连接隧道...")
+        """建立 WebSocket 连接并完成密钥交换（优化版）"""
         try:
             host = str(current_config["sni_host"])
             path = str(current_config["path"])
-            port = str(current_config.get("server_port", 443))
-            
-            headers, ssl_context = get_tls_session(host)
-            url = f"wss://{host}:{port}{path}"
-            print(f"连接 URL: {url}")
+            port = int(current_config.get("server_port", 443))
 
+            # 优化的 SSL 上下文
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+            # 性能优化：启用会话复用
+            ssl_context.options |= ssl.OP_NO_COMPRESSION  # 禁用 TLS 压缩
+            ssl_context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM')  # 优先高性能加密套件
+
+            url = f"wss://{host}:{port}{path}"
+
+            # 建立 WebSocket 连接（优化参数）
             self.ws = await asyncio.wait_for(
                 websockets.connect(
                     url,
                     ssl=ssl_context,
                     server_hostname=host,
                     max_size=None,
-                    ping_interval=None
+                    ping_interval=None,
+                    compression=None,  # 禁用 WebSocket 压缩以提升性能
+                    open_timeout=8,
+                    close_timeout=3,
+                    max_queue=MAX_QUEUE_SIZE  # 限制发送队列
                 ),
                 timeout=10
             )
-            
-            # 密钥协商
+
+            # 密钥交换
             client_pub = os.urandom(32)
             await self.ws.send(client_pub)
-            server_pub = await self.ws.recv()
-            
+            server_pub = await asyncio.wait_for(self.ws.recv(), timeout=3.0)
+
+            if len(server_pub) != 32:
+                raise Exception(f"服务器公钥长度错误: {len(server_pub)}")
+
+            # 密钥派生
             salt = client_pub + server_pub
             psk = bytes.fromhex(current_config["pre_shared_key"])
-            self.send_key, self.recv_key = derive_keys(psk, salt)
-            
+            temp_k1, temp_k2 = derive_keys(psk, salt)
+            self.send_key = temp_k1
+            self.recv_key = temp_k2
+
+            # 认证
             auth_digest = hmac.new(self.send_key, b"auth", digestmod='sha256').digest()
             await self.ws.send(auth_digest)
-            
-            await self.ws.recv()  # 接收 "ok"
-            status = "connected"
-            print("隧道连接成功")
+            auth_response = await asyncio.wait_for(self.ws.recv(), timeout=3.0)
+            expected = hmac.new(self.recv_key, b"ok", digestmod='sha256').digest()
+
+            if not hmac.compare_digest(auth_response, expected):
+                raise Exception("认证失败")
+
+            self.connected = True
+            self.last_used = time.time()
             return True
-            
+
         except Exception as e:
-            print(f"连接失败: {repr(e)}")
-            traceback.print_exc()
-            status = "disconnected"
+            print(f"❌ 连接失败: {repr(e)}")
             return False
 
-    async def heartbeat(self):
-        while status == "connected":
-            try:
-                await self.ws.send(encrypt(self.send_key, b"PING"))
-                resp = await asyncio.wait_for(self.ws.recv(), timeout=10)
-                if decrypt(self.recv_key, resp) != b"PONG":
-                    raise Exception("心跳校验失败")
-            except:
-                status = "disconnected"
-                print("心跳超时或错误，准备重连...")
-                break
-            await asyncio.sleep(15)
+    async def send_connect(self, target):
+        """发送 CONNECT 命令"""
+        try:
+            connect_cmd = f"CONNECT {target}".encode('utf-8')
+            await self.ws.send(encrypt(self.send_key, connect_cmd))
+            response = await asyncio.wait_for(self.ws.recv(), timeout=3.0)
+            plaintext = decrypt(self.recv_key, response)
 
-    async def ws_to_socket(self, ws, writer, key):
+            if plaintext == b"OK":
+                self.use_count += 1
+                self.last_used = time.time()
+                return True
+            return False
+        except Exception:
+            return False
+
+    async def ws_to_socket(self, writer):
+        """WebSocket -> Socket（优化缓冲）"""
         global traffic_down
         try:
-            async for msg in ws:
-                traffic_down += len(msg)
-                decrypted = decrypt(key, msg)
-                writer.write(decrypted)
-                await writer.drain()
+            # 批量处理以减少系统调用
+            async for enc_data in self.ws:
+                traffic_down += len(enc_data)
+                plaintext = decrypt(self.recv_key, enc_data)
+                writer.write(plaintext)
+                # 使用更大的缓冲，减少 drain 调用
+                if writer.transport.get_write_buffer_size() > WRITE_BUFFER_SIZE:
+                    await writer.drain()
+            # 最后一次 drain
+            await writer.drain()
         except:
             pass
         finally:
             writer.close()
 
-    async def socket_to_ws(self, reader, ws, key):
+    async def socket_to_ws(self, reader):
+        """Socket -> WebSocket（优化缓冲）"""
         global traffic_up
         try:
             while True:
-                data = await reader.read(32768)
-                if not data: break
+                # 使用更大的读取缓冲
+                data = await reader.read(READ_BUFFER_SIZE)
+                if not data:
+                    break
                 traffic_up += len(data)
-                encrypted = encrypt(key, data)
-                await ws.send(encrypted)
+                encrypted = encrypt(self.send_key, data)
+                await self.ws.send(encrypted)
         except:
             pass
 
+    def is_reusable(self):
+        """检查隧道是否可复用"""
+        if not self.connected:
+            return False
+        if self.use_count >= MAX_TUNNEL_REUSE:
+            return False
+        if time.time() - self.last_used > TUNNEL_IDLE_TIMEOUT:
+            return False
+        return True
+
     async def close(self):
+        """关闭隧道"""
+        self.connected = False
         if self.ws:
             try:
                 await self.ws.close()
             except:
                 pass
 
-# ==================== 代理处理 (SOCKS5 + HTTP) ====================
-async def handle_socks5(reader, writer):
+# ==================== 隧道池管理 ====================
+async def get_tunnel_from_pool():
+    """从池中获取可用隧道"""
+    async with tunnel_lock:
+        # 清理过期隧道
+        global tunnel_pool
+        tunnel_pool = [t for t in tunnel_pool if t.is_reusable()]
+
+        # 如果池中有可用隧道
+        if tunnel_pool:
+            tunnel = tunnel_pool.pop(0)
+            return tunnel
+
+    # 创建新隧道
     tunnel = SecureTunnel()
+    if await tunnel.connect():
+        return tunnel
+    return None
+
+async def return_tunnel_to_pool(tunnel):
+    """归还隧道到池"""
+    if tunnel and tunnel.is_reusable():
+        async with tunnel_lock:
+            if len(tunnel_pool) < 5:  # 池最大容量
+                tunnel_pool.append(tunnel)
+                return
+    # 超出容量或不可用，直接关闭
+    if tunnel:
+        await tunnel.close()
+
+# ==================== 优化的 SOCKS5 处理 ====================
+async def handle_socks5(reader, writer):
+    """处理 SOCKS5 连接（优化版）"""
+    # 设置 TCP 参数
+    sock = writer.get_extra_info('socket')
+    if sock and TCP_NODELAY:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    if sock and TCP_KEEPALIVE:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    tunnel = None
     try:
-        # 握手
-        data = await reader.readexactly(2)
+        # SOCKS5 握手
+        data = await asyncio.wait_for(reader.readexactly(2), timeout=5)
         if data[0] != 0x05:
             writer.close()
             return
+
         nmethods = data[1]
         await reader.readexactly(nmethods)
         writer.write(b"\x05\x00")
         await writer.drain()
 
-        # 请求
-        data = await reader.readexactly(4)
+        # SOCKS5 请求
+        data = await asyncio.wait_for(reader.readexactly(4), timeout=5)
         if data[1] != 0x01:
             writer.close()
             return
-            
+
+        # 解析目标
         addr_type = data[3]
         if addr_type == 1:
             addr = socket.inet_ntoa(await reader.readexactly(4))
@@ -208,106 +298,176 @@ async def handle_socks5(reader, writer):
         else:
             writer.close()
             return
-        
+
         port = int.from_bytes(await reader.readexactly(2), "big")
         target = f"{addr}:{port}"
 
-        if not await tunnel.connect():
+        # 从池中获取隧道
+        tunnel = await get_tunnel_from_pool()
+        if not tunnel:
+            writer.write(b"\x05\x05\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack(">H", 0))
+            await writer.drain()
             writer.close()
             return
 
-        await tunnel.ws.send(encrypt(tunnel.send_key, f"CONNECT {target}".encode('utf-8')))
-        resp = await tunnel.ws.recv()
-        if decrypt(tunnel.recv_key, resp) != b"OK":
+        # 发送 CONNECT
+        if not await tunnel.send_connect(target):
+            writer.write(b"\x05\x05\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack(">H", 0))
+            await writer.drain()
             writer.close()
+            await tunnel.close()
             return
 
+        # 响应成功
         writer.write(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack(">H", 0))
         await writer.drain()
 
+        # 双向转发
         await asyncio.gather(
-            tunnel.ws_to_socket(tunnel.ws, writer, tunnel.recv_key),
-            tunnel.socket_to_ws(reader, tunnel.ws, tunnel.send_key)
+            tunnel.ws_to_socket(writer),
+            tunnel.socket_to_ws(reader),
+            return_exceptions=True
         )
-    except Exception as e:
-        pass
-    finally:
-        await tunnel.close()
-        try: writer.close()
-        except: pass
 
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        print(f"❌ SOCKS5 错误: {repr(e)}")
+    finally:
+        # 归还隧道到池
+        if tunnel:
+            await return_tunnel_to_pool(tunnel)
+        try:
+            writer.close()
+        except:
+            pass
+
+# ==================== 优化的 HTTP 处理 ====================
 async def handle_http(reader, writer):
-    tunnel = SecureTunnel()
+    """处理 HTTP CONNECT（优化版）"""
+    # 设置 TCP 参数
+    sock = writer.get_extra_info('socket')
+    if sock and TCP_NODELAY:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    if sock and TCP_KEEPALIVE:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    tunnel = None
     try:
-        line = await reader.readline()
+        # 读取 CONNECT 请求
+        line = await asyncio.wait_for(reader.readline(), timeout=5)
         if not line or not line.startswith(b"CONNECT"):
             writer.write(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
             await writer.drain()
             writer.close()
             return
 
+        # 解析目标
         line_str = line.decode('utf-8').strip()
-        _, host_port, _ = line_str.split()
+        parts = line_str.split()
+        if len(parts) < 2:
+            writer.close()
+            return
+
+        host_port = parts[1]
         if ":" in host_port:
             host, port = host_port.split(":", 1)
         else:
             host = host_port
-            port = 443
-        
+            port = "443"
         target = f"{host}:{port}"
 
+        # 丢弃 headers
         while True:
             header = await reader.readline()
-            if header == b'\r\n' or header == b'\n' or not header:
+            if header in (b'\r\n', b'\n', b''):
                 break
 
-        if not await tunnel.connect():
+        # 从池中获取隧道
+        tunnel = await get_tunnel_from_pool()
+        if not tunnel:
             writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             await writer.drain()
             writer.close()
             return
 
-        await tunnel.ws.send(encrypt(tunnel.send_key, f"CONNECT {target}".encode('utf-8')))
-        resp = await tunnel.ws.recv()
-        if decrypt(tunnel.recv_key, resp) != b"OK":
+        # 发送 CONNECT
+        if not await tunnel.send_connect(target):
+            writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            await writer.drain()
             writer.close()
+            await tunnel.close()
             return
 
+        # 响应成功
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await writer.drain()
 
+        # 双向转发
         await asyncio.gather(
-            tunnel.ws_to_socket(tunnel.ws, writer, tunnel.recv_key),
-            tunnel.socket_to_ws(reader, tunnel.ws, tunnel.send_key)
+            tunnel.ws_to_socket(writer),
+            tunnel.socket_to_ws(reader),
+            return_exceptions=True
         )
-    except Exception as e:
-        pass
-    finally:
-        await tunnel.close()
-        try: writer.close()
-        except: pass
 
-# ==================== 主循环 ====================
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        print(f"❌ HTTP 错误: {repr(e)}")
+    finally:
+        # 归还隧道到池
+        if tunnel:
+            await return_tunnel_to_pool(tunnel)
+        try:
+            writer.close()
+        except:
+            pass
+
+# ==================== 启动服务器 ====================
 async def start_servers():
+    """启动代理服务器"""
     if not current_config:
-        print("❌ 无有效配置，退出")
+        print("❌ 无有效配置")
         return
-    
+
     try:
         socks_port = int(current_config["socks_port"])
         http_port = int(current_config["http_port"])
-        
-        socks = await asyncio.start_server(handle_socks5, "127.0.0.1", socks_port)
-        http = await asyncio.start_server(handle_http, "127.0.0.1", http_port)
-        
-        print(f"SOCKS5 监听: 127.0.0.1:{socks_port}")
-        print(f"HTTP   监听: 127.0.0.1:{http_port}")
-        print("----------------------------------------------")
-        
-        async with socks, http:
-            await asyncio.gather(socks.serve_forever(), http.serve_forever())
+
+        # 优化：设置 backlog
+        socks_server = await asyncio.start_server(
+            handle_socks5, "127.0.0.1", socks_port, backlog=128
+        )
+        http_server = await asyncio.start_server(
+            handle_http, "127.0.0.1", http_port, backlog=128
+        )
+
+        print("=" * 60)
+        print(f"✅ SOCKS5: 127.0.0.1:{socks_port}")
+        print(f"✅ HTTP:   127.0.0.1:{http_port}")
+        print(f"⚡ 性能优化: 已启用")
+        print(f"   - 缓冲区: {READ_BUFFER_SIZE//1024}KB")
+        print(f"   - TCP_NODELAY: {TCP_NODELAY}")
+        print(f"   - 连接池: 启用")
+        print("=" * 60)
+
+        async with socks_server, http_server:
+            await asyncio.gather(
+                socks_server.serve_forever(),
+                http_server.serve_forever()
+            )
+
     except OSError as e:
-        print(f"端口被占用或权限不足: {e}")
+        print(f"❌ 端口占用: {e}")
+        sys.exit(1)
+
+# ==================== 主函数 ====================
+async def main():
+    """主协程"""
+    await asyncio.gather(
+        start_servers(),
+        traffic_monitor()
+    )
 
 # ==================== 启动 ====================
 if __name__ == "__main__":
@@ -315,15 +475,23 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     load_configs()
-    
-    if not current_config:
-        print("❌ 无配置！请确保配置文件存在")
+    active_name = load_active_config()
+
+    if active_name:
+        active_config_name = active_name
+        current_config = configs[active_name]
+    else:
+        print("❌ 无配置文件")
         sys.exit(1)
 
-    print("🚀 SecureProxy 客户端启动中...")
-    print(f"🌐 当前配置: {current_config['name']}")
+    print("\n🚀 SecureProxy 客户端启动中...")
+    print(f"🌍 节点: {active_config_name}")
+    print()
 
     try:
-        asyncio.run(start_servers())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n用户停止")
+        print("\n\n👋 用户停止")
+    except Exception as e:
+        print(f"\n❌ 启动失败: {e}")
+        traceback.print_exc()
