@@ -15,9 +15,10 @@ import traceback
 from crypto import derive_keys, encrypt, decrypt
 
 # ==================== 性能优化配置 ====================
-READ_BUFFER_SIZE = 65536
-WRITE_BUFFER_SIZE = 65536
-MAX_QUEUE_SIZE = 100
+# 4*1024*1024 = 4194304 = 4M 的吞吐量
+READ_BUFFER_SIZE = 4194304
+WRITE_BUFFER_SIZE = 4194304
+MAX_QUEUE_SIZE = 200
 MAX_TUNNEL_REUSE = 50
 TUNNEL_IDLE_TIMEOUT = 300
 TCP_NODELAY = True
