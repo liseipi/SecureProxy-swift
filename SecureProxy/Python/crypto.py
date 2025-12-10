@@ -1,9 +1,8 @@
-# crypto.py
+# crypto.py - 统一使用 AES-256-GCM（兼容 CF Workers 和 VPS）
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF  # 修复：正确导入 HKDF
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
-import hmac
 
 def derive_keys(shared_key: bytes, salt: bytes):
     hkdf = HKDF(
@@ -16,12 +15,12 @@ def derive_keys(shared_key: bytes, salt: bytes):
     return key_material[:32], key_material[32:64]  # send_key, recv_key
 
 def encrypt(key: bytes, plaintext: bytes, aad: bytes = b"") -> bytes:
-    chacha = ChaCha20Poly1305(key)
+    aesgcm = AESGCM(key)
     nonce = os.urandom(12)
-    ct = chacha.encrypt(nonce, plaintext, aad)
+    ct = aesgcm.encrypt(nonce, plaintext, aad)
     return nonce + ct
 
 def decrypt(key: bytes, ciphertext: bytes, aad: bytes = b"") -> bytes:
-    chacha = ChaCha20Poly1305(key)
+    aesgcm = AESGCM(key)
     nonce, ct = ciphertext[:12], ciphertext[12:]
-    return chacha.decrypt(nonce, ct, aad)
+    return aesgcm.decrypt(nonce, ct, aad)

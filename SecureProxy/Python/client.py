@@ -1,4 +1,4 @@
-# client.py - 性能优化版 (从环境变量读取配置)
+# client.py
 import asyncio
 import json
 import os
@@ -10,17 +10,17 @@ import websockets
 import ssl
 import time
 import traceback
+from pathlib import Path
 
 # 核心模块导入
 from crypto import derive_keys, encrypt, decrypt
 
 # ==================== 性能优化配置 ====================
-# 4*1024*1024 = 4194304 = 4M 的吞吐量
-READ_BUFFER_SIZE = 4194304
-WRITE_BUFFER_SIZE = 4194304
-MAX_QUEUE_SIZE = 200
-MAX_TUNNEL_REUSE = 50
-TUNNEL_IDLE_TIMEOUT = 300
+READ_BUFFER_SIZE = 8192 #10M
+WRITE_BUFFER_SIZE = 2048 #10M
+MAX_QUEUE_SIZE = 100
+MAX_TUNNEL_REUSE = 10
+TUNNEL_IDLE_TIMEOUT = 60
 TCP_NODELAY = True
 TCP_KEEPALIVE = True
 
@@ -38,30 +38,30 @@ def load_config_from_env():
     try:
         # Swift 端会通过环境变量传递 JSON 配置
         config_json = os.environ.get('SECURE_PROXY_CONFIG')
-        
+
         if not config_json:
             print("❌ 错误: 未找到配置 (SECURE_PROXY_CONFIG 环境变量)")
             return None
-        
+
         config = json.loads(config_json)
-        
+
         # 验证必需字段
         required_fields = ['name', 'sni_host', 'path', 'server_port',
                           'socks_port', 'http_port', 'pre_shared_key']
-        
+
         for field in required_fields:
             if field not in config:
                 print(f"❌ 错误: 配置缺少字段 '{field}'")
                 return None
-        
+
         print(f"✅ 加载配置: {config['name']}")
         print(f"   - 服务器: {config['sni_host']}:{config['server_port']}")
         print(f"   - 路径: {config['path']}")
         print(f"   - SOCKS5: {config['socks_port']}")
         print(f"   - HTTP: {config['http_port']}")
-        
+
         return config
-        
+
     except json.JSONDecodeError as e:
         print(f"❌ 配置 JSON 解析失败: {e}")
         return None
@@ -93,21 +93,20 @@ class SecureTunnel:
         self.last_used = time.time()
 
     async def connect(self):
-        """建立 WebSocket 连接并完成密钥交换（优化版）"""
+        """建立 WebSocket 连接并完成密钥交换"""
         try:
             host = str(current_config["sni_host"])
             path = str(current_config["path"])
             port = int(current_config.get("server_port", 443))
 
-            # 调试信息
-            print(f"🔗 连接到: wss://{host}:{port}{path}")
-
             # 优化的 SSL 上下文
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-            ssl_context.options |= ssl.OP_NO_COMPRESSION
-            ssl_context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM')
+
+            # 性能优化：启用会话复用
+            ssl_context.options |= ssl.OP_NO_COMPRESSION  # 禁用 TLS 压缩
+            ssl_context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM')  # 优先高性能加密套件
 
             url = f"wss://{host}:{port}{path}"
 
@@ -119,10 +118,10 @@ class SecureTunnel:
                     server_hostname=host,
                     max_size=None,
                     ping_interval=None,
-                    compression=None,
+                    compression=None,  # 禁用 WebSocket 压缩以提升性能
                     open_timeout=8,
                     close_timeout=3,
-                    max_queue=MAX_QUEUE_SIZE
+                    max_queue=MAX_QUEUE_SIZE  # 限制发送队列
                 ),
                 timeout=10
             )
@@ -153,7 +152,6 @@ class SecureTunnel:
 
             self.connected = True
             self.last_used = time.time()
-            print("✅ 隧道建立成功")
             return True
 
         except Exception as e:
@@ -177,15 +175,18 @@ class SecureTunnel:
             return False
 
     async def ws_to_socket(self, writer):
-        """WebSocket -> Socket（优化缓冲）"""
+        """WebSocket -> Socket"""
         global traffic_down
         try:
+            # 批量处理以减少系统调用
             async for enc_data in self.ws:
                 traffic_down += len(enc_data)
                 plaintext = decrypt(self.recv_key, enc_data)
                 writer.write(plaintext)
+                # 使用更大的缓冲，减少 drain 调用
                 if writer.transport.get_write_buffer_size() > WRITE_BUFFER_SIZE:
                     await writer.drain()
+            # 最后一次 drain
             await writer.drain()
         except:
             pass
@@ -193,10 +194,11 @@ class SecureTunnel:
             writer.close()
 
     async def socket_to_ws(self, reader):
-        """Socket -> WebSocket（优化缓冲）"""
+        """Socket -> WebSocket"""
         global traffic_up
         try:
             while True:
+                # 使用更大的读取缓冲
                 data = await reader.read(READ_BUFFER_SIZE)
                 if not data:
                     break
@@ -229,13 +231,16 @@ class SecureTunnel:
 async def get_tunnel_from_pool():
     """从池中获取可用隧道"""
     async with tunnel_lock:
+        # 清理过期隧道
         global tunnel_pool
         tunnel_pool = [t for t in tunnel_pool if t.is_reusable()]
 
+        # 如果池中有可用隧道
         if tunnel_pool:
             tunnel = tunnel_pool.pop(0)
             return tunnel
 
+    # 创建新隧道
     tunnel = SecureTunnel()
     if await tunnel.connect():
         return tunnel
@@ -245,15 +250,15 @@ async def return_tunnel_to_pool(tunnel):
     """归还隧道到池"""
     if tunnel and tunnel.is_reusable():
         async with tunnel_lock:
-            if len(tunnel_pool) < 5:
+            if len(tunnel_pool) < 5:  # 池最大容量
                 tunnel_pool.append(tunnel)
                 return
     if tunnel:
         await tunnel.close()
 
-# ==================== 优化的 SOCKS5 处理 ====================
+# ==================== SOCKS5 处理 ====================
 async def handle_socks5(reader, writer):
-    """处理 SOCKS5 连接（优化版）"""
+    """处理 SOCKS5 连接"""
     sock = writer.get_extra_info('socket')
     if sock and TCP_NODELAY:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -325,6 +330,7 @@ async def handle_socks5(reader, writer):
     except Exception as e:
         print(f"❌ SOCKS5 错误: {repr(e)}")
     finally:
+        # 归还隧道到池
         if tunnel:
             await return_tunnel_to_pool(tunnel)
         try:
@@ -332,9 +338,9 @@ async def handle_socks5(reader, writer):
         except:
             pass
 
-# ==================== 优化的 HTTP 处理 ====================
+# ==================== HTTP 处理 ====================
 async def handle_http(reader, writer):
-    """处理 HTTP CONNECT（优化版）"""
+    """处理 HTTP CONNECT"""
     sock = writer.get_extra_info('socket')
     if sock and TCP_NODELAY:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -404,6 +410,7 @@ async def handle_http(reader, writer):
     except Exception as e:
         print(f"❌ HTTP 错误: {repr(e)}")
     finally:
+        # 归还隧道到池
         if tunnel:
             await return_tunnel_to_pool(tunnel)
         try:
@@ -422,6 +429,7 @@ async def start_servers():
         socks_port = int(current_config["socks_port"])
         http_port = int(current_config["http_port"])
 
+        # 设置 backlog
         socks_server = await asyncio.start_server(
             handle_socks5, "127.0.0.1", socks_port, backlog=128
         )
@@ -432,10 +440,12 @@ async def start_servers():
         print("=" * 60)
         print(f"✅ SOCKS5: 127.0.0.1:{socks_port}")
         print(f"✅ HTTP:   127.0.0.1:{http_port}")
+        print(f"🔐 加密: AES-256-GCM")
         print(f"⚡ 性能优化: 已启用")
         print(f"   - 缓冲区: {READ_BUFFER_SIZE//1024}KB")
         print(f"   - TCP_NODELAY: {TCP_NODELAY}")
         print(f"   - 连接池: 启用")
+        print(f"💡 兼容: CF Workers & VPS Server")
         print("=" * 60)
 
         async with socks_server, http_server:
@@ -463,7 +473,7 @@ if __name__ == "__main__":
 
     # 从环境变量加载配置
     current_config = load_config_from_env()
-    
+
     if not current_config:
         print("❌ 无法启动: 配置加载失败")
         print("提示: 请确保 Swift 端正确设置了 SECURE_PROXY_CONFIG 环境变量")
