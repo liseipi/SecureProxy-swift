@@ -11,6 +11,7 @@ struct StatusBar: View {
                     Text(manager.activeConfig?.name ?? "未选择配置")
                         .font(.title3)
                         .fontWeight(.semibold)
+                        .foregroundColor(.primary)
                     
                     HStack(spacing: 6) {
                         Image(systemName: manager.status.icon)
@@ -38,8 +39,11 @@ struct StatusBar: View {
                     .scaleEffect(1.2)
                     
                     Button(action: { showingLogs = true }) {
-                        Label("查看日志", systemImage: "doc.text")
-                            .font(.caption)
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.text")
+                            Text("查看日志")
+                        }
+                        .font(.caption)
                     }
                     .buttonStyle(.borderless)
                 }
@@ -99,6 +103,7 @@ struct TrafficLabel: View {
             Text(formatSpeed(value))
                 .font(.system(.body, design: .rounded))
                 .fontWeight(.medium)
+                .foregroundColor(.primary)  // 确保速度数字清晰
         }
     }
     

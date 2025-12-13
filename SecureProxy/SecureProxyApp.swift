@@ -53,6 +53,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func showMainWindow() {
+        // 🔥 关键修复：激活应用程序
+        NSApp.activate(ignoringOtherApps: true)
+        
         // 查找主窗口（排除菜单栏弹出窗口）
         let mainWindow = NSApp.windows.first { window in
             window.contentViewController != nil &&
@@ -62,9 +65,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         if let window = mainWindow {
             // 如果窗口已存在，直接显示
-            if !window.isVisible {
-                window.makeKeyAndOrderFront(nil)
-            }
+            window.makeKeyAndOrderFront(nil)
             
             // 临时设为浮动窗口以确保显示在最前面
             window.level = .floating
@@ -138,7 +139,19 @@ struct MenuBarLabel: View {
 }
 
 // ===================================
-// 菜单栏视图
+// 自定义 LabelStyle - 强制水平布局
+// ===================================
+struct HorizontalLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.icon
+            configuration.title
+        }
+    }
+}
+
+// ===================================
+// 菜单栏视图 - 使用自定义 LabelStyle
 // ===================================
 struct MenuBarView: View {
     let appDelegate: AppDelegate
@@ -150,11 +163,12 @@ struct MenuBarView: View {
         VStack(spacing: 0) {
             // 状态信息
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: manager.status.icon)
                         .foregroundColor(manager.status.color)
                     Text(manager.status.text)
                         .font(.headline)
+                    Spacer()
                 }
                 
                 if let config = manager.activeConfig {
@@ -169,20 +183,20 @@ struct MenuBarView: View {
             
             Divider()
             
-            // 开关
-            Toggle(isOn: Binding(
-                get: { manager.isRunning },
-                set: { isOn in
-                    if isOn {
-                        manager.start()
-                    } else {
-                        manager.stop()
-                    }
+            // 开关按钮
+            Button(action: {
+                if manager.isRunning {
+                    manager.stop()
+                } else {
+                    manager.start()
                 }
-            )) {
-                Label(manager.isRunning ? "停止代理" : "启动代理", systemImage: manager.isRunning ? "stop.circle" : "play.circle")
+            }) {
+                Label(manager.isRunning ? "停止代理" : "启动代理",
+                      systemImage: manager.isRunning ? "stop.circle.fill" : "play.circle.fill")
+                    .labelStyle(HorizontalLabelStyle())
+                    .foregroundColor(manager.isRunning ? .red : .green)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .toggleStyle(.button)
             .buttonStyle(.borderless)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -192,27 +206,23 @@ struct MenuBarView: View {
                 Divider()
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.caption)
-                        Text("\(String(format: "%.1f", manager.trafficUp)) KB/s")
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
+                    // 上传
+                    Label(String(format: "%.1f KB/s", manager.trafficUp),
+                          systemImage: "arrow.up.circle.fill")
+                        .labelStyle(HorizontalLabelStyle())
+                        .foregroundColor(.blue)
                     
-                    HStack {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundColor(.green)
-                            .font(.caption)
-                        Text("\(String(format: "%.1f", manager.trafficDown)) KB/s")
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
+                    // 下载
+                    Label(String(format: "%.1f KB/s", manager.trafficDown),
+                          systemImage: "arrow.down.circle.fill")
+                        .labelStyle(HorizontalLabelStyle())
+                        .foregroundColor(.green)
                     
+                    // 端口信息
                     Text("SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                        .padding(.top, 2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
@@ -221,21 +231,26 @@ struct MenuBarView: View {
             
             Divider()
             
-            // 功能按钮
+            // 打开主窗口按钮
             Button(action: {
                 appDelegate.showMainWindow()
                 openWindow(id: "main")
             }) {
                 Label("打开主窗口", systemImage: "macwindow")
+                    .labelStyle(HorizontalLabelStyle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.borderless)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             
+            // 查看日志按钮
             Button(action: {
                 showingLogs = true
             }) {
                 Label("查看日志", systemImage: "doc.text")
+                    .labelStyle(HorizontalLabelStyle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.borderless)
             .padding(.horizontal, 8)
@@ -248,6 +263,9 @@ struct MenuBarView: View {
                 NSApplication.shared.terminate(nil)
             }) {
                 Label("退出", systemImage: "power")
+                    .labelStyle(HorizontalLabelStyle())
+                    .foregroundColor(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.borderless)
             .padding(.horizontal, 8)
