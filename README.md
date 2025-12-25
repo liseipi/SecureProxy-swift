@@ -22,7 +22,7 @@ Swift 开发的现代化代理管理工具，提供 SOCKS5 和 HTTP 代理服务
 ## 🖼️ 界面预览
 
 ### 主窗口
-<img src="https://assets.musicses.vip/images/proxy/proxy_main.png" width="300" />
+<img src="https://assets.musicses.vip/images/proxy/proxy_main.png" width="500" />
 
 **主窗口功能区域：**
 1. **状态栏**（顶部）：显示当前配置、连接状态、开关按钮
@@ -31,7 +31,7 @@ Swift 开发的现代化代理管理工具，提供 SOCKS5 和 HTTP 代理服务
 4. **工具栏**（底部）：添加新配置、显示配置数量
 
 ### 配置编辑器
-<img src="https://assets.musicses.vip/images/proxy/proxy_add.png" width="300" />
+<img src="https://assets.musicses.vip/images/proxy/proxy_add.png" width="500" />
 
 **编辑器特性：**
 - 实时输入验证（端口范围、密钥格式）
@@ -49,7 +49,7 @@ Swift 开发的现代化代理管理工具，提供 SOCKS5 和 HTTP 代理服务
 - 退出应用
 
 ### 日志窗口
-<img src="https://assets.musicses.vip/images/proxy/proxy_log.png" width="300" />
+<img src="https://assets.musicses.vip/images/proxy/proxy_log.png" width="400" />
 
 **日志窗口特性：**
 - 带行号的日志显示
