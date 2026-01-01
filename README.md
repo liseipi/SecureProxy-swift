@@ -8,6 +8,10 @@
 ![Python](https://img.shields.io/badge/Python-3.8%2B-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+<p align="center">
+  <img src="SecureProxy/Assets.xcassets/icon.png" width="128" height="128" alt="SystemProxy Logo">
+</p>
+
 **原生 macOS 安全代理客户端 - 极简设计，强大功能**
 
 Swift 开发的现代化代理管理工具，提供 SOCKS5 和 HTTP 代理服务
