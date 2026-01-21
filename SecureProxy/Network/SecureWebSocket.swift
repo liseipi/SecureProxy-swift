@@ -1,6 +1,7 @@
-// SecureWebSocket.swift
+// SecureWebSocket.swift - 修复版
 import Foundation
 import Network
+import CryptoKit
 
 actor SecureWebSocket {
     private let config: ProxyConfig
@@ -18,14 +19,12 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
-        // 解析服务器地址
         let host = NWEndpoint.Host(config.sniHost)
         let port = NWEndpoint.Port(integerLiteral: UInt16(config.serverPort))
         
         // 配置 TLS
         let tlsOptions = NWProtocolTLS.Options()
         
-        // 允许自签名证书（生产环境应该验证）
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
             { _, _, completion in
@@ -34,35 +33,48 @@ actor SecureWebSocket {
             DispatchQueue.global()
         )
         
-        // 设置 SNI
         sec_protocol_options_set_tls_server_name(
             tlsOptions.securityProtocolOptions,
             config.sniHost
         )
         
-        // 配置 WebSocket
+        // 🔧 修复：正确配置 WebSocket
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true
         
-        // 设置请求头
+        // 设置 WebSocket 路径
         wsOptions.setAdditionalHeaders([
             ("Host", config.sniHost),
-            ("User-Agent", "SecureProxy-Swift/1.0")
+            ("User-Agent", "SecureProxy-Swift/2.0"),
+            ("Upgrade", "websocket"),
+            ("Connection", "Upgrade")
         ])
         
-        // 创建连接参数
+        // 🔧 修复：创建正确的参数配置
         let parameters = NWParameters(tls: tlsOptions)
         
-        // 修复：正确添加 WebSocket 协议
-        let wsDefinition = NWProtocolWebSocket.definition
-        parameters.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)
+        // 🔧 修复：正确的方式添加 WebSocket 协议
+        let websocketOptions = NWProtocolWebSocket.Options()
+        websocketOptions.autoReplyPing = true
+        
+        // 设置 WebSocket 请求路径
+        if !config.path.isEmpty {
+            // 构造完整的 WebSocket URL
+            let urlString = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
+            if let url = URL(string: urlString) {
+                websocketOptions.setAdditionalHeaders([
+                    ("Host", config.sniHost),
+                    ("Origin", "https://\(config.sniHost)"),
+                    ("User-Agent", "SecureProxy-Swift/2.0")
+                ])
+            }
+        }
+        
+        // 添加 WebSocket 到协议栈
+        parameters.defaultProtocolStack.applicationProtocols.insert(websocketOptions, at: 0)
         
         // 创建连接
-        connection = NWConnection(
-            host: host,
-            port: port,
-            using: parameters
-        )
+        connection = NWConnection(host: host, port: port, using: parameters)
         
         // 启动连接
         return try await withCheckedThrowingContinuation { continuation in
@@ -82,6 +94,7 @@ actor SecureWebSocket {
     ) {
         switch state {
         case .ready:
+            print("✅ WebSocket 连接就绪")
             Task {
                 do {
                     try await setupKeys()
@@ -89,18 +102,31 @@ actor SecureWebSocket {
                     continuation.resume()
                     startReceiving()
                 } catch {
+                    print("❌ 密钥交换失败: \(error)")
                     continuation.resume(throwing: error)
                 }
             }
             
         case .failed(let error):
+            print("❌ WebSocket 连接失败: \(error)")
             continuation.resume(throwing: error)
             
         case .waiting(let error):
-            print("⚠️ Connection waiting: \(error)")
+            print("⚠️ WebSocket 等待中: \(error)")
+            // 不要在 waiting 状态终止，继续等待
             
-        default:
-            break
+        case .preparing:
+            print("🔄 WebSocket 准备中...")
+            
+        case .setup:
+            print("🔧 WebSocket 设置中...")
+            
+        case .cancelled:
+            print("🛑 WebSocket 已取消")
+            continuation.resume(throwing: WebSocketError.notConnected)
+            
+        @unknown default:
+            print("⚠️ 未知状态: \(state)")
         }
     }
     
@@ -111,15 +137,19 @@ actor SecureWebSocket {
             throw WebSocketError.notConnected
         }
         
+        print("🔑 开始密钥交换...")
+        
         // 1. 生成客户端公钥
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
         try await sendRaw(clientPub)
+        print("📤 已发送客户端公钥")
         
         // 2. 接收服务器公钥
         let serverPub = try await recvRaw()
         guard serverPub.count == 32 else {
             throw WebSocketError.invalidServerKey
         }
+        print("📥 已接收服务器公钥")
         
         // 3. 派生密钥
         let salt = clientPub + serverPub
@@ -128,11 +158,13 @@ actor SecureWebSocket {
         
         sendKey = keys.sendKey
         recvKey = keys.recvKey
+        print("🔐 密钥派生完成")
         
         // 4. 认证
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
         try await sendRaw(challenge)
+        print("📤 已发送认证请求")
         
         // 5. 验证响应
         let authResponse = try await recvRaw()
@@ -142,6 +174,7 @@ actor SecureWebSocket {
         guard timingSafeEqual(authResponse, expected) else {
             throw WebSocketError.authenticationFailed
         }
+        print("✅ 认证成功")
     }
     
     // MARK: - Send/Receive
@@ -279,7 +312,7 @@ actor SecureWebSocket {
         messageQueue.removeAll()
     }
     
-    // MARK: - 内部加密方法（移到 actor 内部避免 MainActor 问题）
+    // MARK: - Crypto Helpers
     
     private func deriveKeys(sharedKey: Data, salt: Data) -> (sendKey: Data, recvKey: Data) {
         let info = "secure-proxy-v1".data(using: .utf8)!
@@ -355,7 +388,7 @@ actor SecureWebSocket {
         var hex = hex
         
         while !hex.isEmpty {
-            let subIndex = hex.index(hex.startIndex, offsetBy: 2)
+            let subIndex = hex.index(hex.startIndex, offsetBy: min(2, hex.count))
             let substring = hex[..<subIndex]
             
             if let byte = UInt8(substring, radix: 16) {
@@ -396,6 +429,3 @@ enum WebSocketError: Error {
         }
     }
 }
-
-// 添加必要的导入
-import CryptoKit

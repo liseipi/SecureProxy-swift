@@ -1,4 +1,4 @@
-// ProxyManager.swift
+// ProxyManager.swift - 修复通知权限
 import Foundation
 import Combine
 import AppKit
@@ -20,6 +20,7 @@ class ProxyManager: ObservableObject {
     private var configDirectory: URL
     private var timer: Timer?
     private var statsTimer: Timer?
+    private var notificationsEnabled = false
     
     init() {
         let fm = FileManager.default
@@ -34,15 +35,26 @@ class ProxyManager: ObservableObject {
         loadConfigs()
         startTrafficMonitor()
         
-        addLog("✅ SwiftProxyManager 初始化完成")
+        addLog("✅ ProxyManager 初始化完成")
         addLog("🔧 使用纯 Swift 实现的代理客户端")
     }
     
+    // 🔧 修复：改进通知权限请求
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error = error {
-                print("通知权限请求失败: \(error)")
+        center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    // 不再将通知错误记录为严重问题
+                    print("⚠️ 通知权限: \(error.localizedDescription)")
+                    self?.notificationsEnabled = false
+                } else if granted {
+                    print("✅ 通知权限已授予")
+                    self?.notificationsEnabled = true
+                } else {
+                    print("ℹ️ 通知权限被拒绝（可在系统设置中启用）")
+                    self?.notificationsEnabled = false
+                }
             }
         }
     }
@@ -52,7 +64,7 @@ class ProxyManager: ObservableObject {
     func loadConfigs() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: configDirectory, includingPropertiesForKeys: nil) else {
-            addLog("配置目录为空")
+            addLog("ℹ️ 配置目录为空")
             return
         }
         
@@ -66,7 +78,7 @@ class ProxyManager: ObservableObject {
                 return config
             }
         
-        addLog("加载了 \(configs.count) 个配置")
+        addLog("📂 加载了 \(configs.count) 个配置")
         
         if let activeName = UserDefaults.standard.string(forKey: "activeConfig"),
            let active = configs.first(where: { $0.name == activeName }) {
@@ -85,7 +97,7 @@ class ProxyManager: ObservableObject {
         let url = configDirectory.appendingPathComponent("\(config.name).json")
         try? data.write(to: url)
         
-        addLog("保存配置: \(config.name)")
+        addLog("💾 保存配置: \(config.name)")
         loadConfigs()
     }
     
@@ -93,7 +105,7 @@ class ProxyManager: ObservableObject {
         let url = configDirectory.appendingPathComponent("\(config.name).json")
         try? FileManager.default.removeItem(at: url)
         
-        addLog("删除配置: \(config.name)")
+        addLog("🗑️ 删除配置: \(config.name)")
         loadConfigs()
     }
     
@@ -101,7 +113,7 @@ class ProxyManager: ObservableObject {
         activeConfig = config
         UserDefaults.standard.set(config.name, forKey: "activeConfig")
         
-        addLog("切换到配置: \(config.name)")
+        addLog("🔄 切换到配置: \(config.name)")
         
         if isRunning {
             stop()
@@ -124,6 +136,7 @@ class ProxyManager: ObservableObject {
         addLog("🚀 启动代理...")
         addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
         addLog("🔐 使用 AES-256-GCM 加密")
+        addLog("🌐 WebSocket 路径: \(config.path)")
         
         Task {
             await startProxyServers(config: config)
@@ -168,10 +181,13 @@ class ProxyManager: ObservableObject {
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
             
-            self.showNotification(
-                title: "代理已启动",
-                message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
-            )
+            // 只在有权限时发送通知
+            if notificationsEnabled {
+                self.showNotification(
+                    title: "代理已启动",
+                    message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
+                )
+            }
             
         } catch {
             self.addLog("❌ 启动失败: \(error.localizedDescription)")
@@ -220,11 +236,10 @@ class ProxyManager: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
-            // 在主线程更新 UI
             DispatchQueue.main.async {
                 guard self.isRunning else { return }
                 
-                // 模拟流量数据（实际应从连接中获取）
+                // 模拟流量数据
                 self.trafficUp = Double.random(in: 0...100)
                 self.trafficDown = Double.random(in: 0...100)
             }
@@ -243,7 +258,7 @@ class ProxyManager: ObservableObject {
     
     func clearLogs() {
         logs.removeAll()
-        addLog("日志已清除")
+        addLog("🗑️ 日志已清除")
     }
     
     // MARK: - Import/Export
@@ -266,7 +281,9 @@ class ProxyManager: ObservableObject {
                 
                 DispatchQueue.main.async {
                     self.addLog("✅ 配置已导出: \(config.name)")
-                    self.showNotification(title: "导出成功", message: "配置已保存到 \(url.lastPathComponent)")
+                    if self.notificationsEnabled {
+                        self.showNotification(title: "导出成功", message: "配置已保存到 \(url.lastPathComponent)")
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -299,7 +316,9 @@ class ProxyManager: ObservableObject {
                 
                 DispatchQueue.main.async {
                     self.addLog("✅ 已导出 \(self.configs.count) 个配置")
-                    self.showNotification(title: "导出成功", message: "已导出 \(self.configs.count) 个配置")
+                    if self.notificationsEnabled {
+                        self.showNotification(title: "导出成功", message: "已导出 \(self.configs.count) 个配置")
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -352,7 +371,9 @@ class ProxyManager: ObservableObject {
         
         DispatchQueue.main.async {
             self.addLog("✅ 成功导入配置: \(newConfig.name)")
-            self.showNotification(title: "导入成功", message: "配置 \(newConfig.name) 已导入")
+            if self.notificationsEnabled {
+                self.showNotification(title: "导入成功", message: "配置 \(newConfig.name) 已导入")
+            }
         }
     }
     
@@ -373,11 +394,16 @@ class ProxyManager: ObservableObject {
         
         DispatchQueue.main.async {
             self.addLog("✅ 成功导入 \(importedCount) 个配置")
-            self.showNotification(title: "导入成功", message: "已导入 \(importedCount) 个配置")
+            if self.notificationsEnabled {
+                self.showNotification(title: "导入成功", message: "已导入 \(importedCount) 个配置")
+            }
         }
     }
     
+    // 🔧 修复：只在有权限时发送通知
     private func showNotification(title: String, message: String) {
+        guard notificationsEnabled else { return }
+        
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = message
@@ -391,20 +417,17 @@ class ProxyManager: ObservableObject {
         
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("通知发送失败: \(error)")
+                print("⚠️ 通知发送失败: \(error.localizedDescription)")
             }
         }
     }
     
     deinit {
 //        timer?.invalidate()
-//        statsTimer?.invalidate()
         
-        // 捕获服务器实例的本地副本，避免在闭包中捕获 self
         let socks = socksServer
         let http = httpServer
         
-        // 异步清理
         Task { @MainActor in
             if let socks = socks {
                 await socks.stop()

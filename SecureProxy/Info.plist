@@ -14,12 +14,32 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    
+    <!-- 本地网络访问权限 -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>SecureProxy 需要访问本地网络来提供代理服务</string>
+    
+    <!-- 允许任意 HTTPS 连接 -->
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    
+    <!-- 应用类别 -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    
+    <!-- 支持后台模式 -->
+    <key>LSUIElement</key>
+    <false/>
+    
+    <!-- 版本信息 -->
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    
+    <!-- 版权信息 -->
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2025. All rights reserved.</string>
 </dict>
 </plist>
