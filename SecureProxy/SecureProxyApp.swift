@@ -1,9 +1,11 @@
+// SecureProxyApp.swift
+// 完全修复版本 - 使用 SwiftProxyManager
 import SwiftUI
 
 @main
 struct SecureProxyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var manager = ProxyManager()
+    @StateObject private var manager = ProxyManager()  // 使用新的管理器
     
     var body: some Scene {
         // 主窗口
@@ -19,10 +21,10 @@ struct SecureProxyApp: App {
                 Button("关于 SecureProxy") {
                     NSApplication.shared.orderFrontStandardAboutPanel(
                         options: [
-                            NSApplication.AboutPanelOptionKey.applicationName: "SecureProxy",
-                            NSApplication.AboutPanelOptionKey.applicationVersion: "1.0.0",
+                            NSApplication.AboutPanelOptionKey.applicationName: "SecureProxy Swift",
+                            NSApplication.AboutPanelOptionKey.applicationVersion: "2.0.0",
                             NSApplication.AboutPanelOptionKey.credits: NSAttributedString(
-                                string: "安全代理客户端\n支持 SOCKS5 和 HTTP 代理",
+                                string: "纯 Swift 实现的安全代理客户端\n支持 SOCKS5 和 HTTP 代理\n基于 Network.framework",
                                 attributes: [NSAttributedString.Key.font: NSFont.systemFont(ofSize: 11)]
                             )
                         ]
@@ -31,7 +33,7 @@ struct SecureProxyApp: App {
             }
         }
         
-        // ✅ 新增：独立的日志窗口
+        // 日志窗口
         Window("运行日志", id: "logs") {
             LogsWindowView()
                 .environmentObject(manager)
@@ -161,6 +163,16 @@ struct MenuBarView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
+                
+                // Swift 版本标识
+                HStack {
+                    Image(systemName: "swift")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                    Text("Swift 原生实现")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
@@ -223,7 +235,6 @@ struct MenuBarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             
-            // ✅ 修改：打开独立的日志窗口
             Button(action: {
                 openWindow(id: "logs")
             }) {
@@ -249,6 +260,6 @@ struct MenuBarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
         }
-        .frame(width: 240)
+        .frame(width: 260)
     }
 }

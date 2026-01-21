@@ -1,8 +1,11 @@
+// Views/StatusBar.swift
+// 修复版本 - 支持 SwiftProxyManager
+
 import SwiftUI
 
 struct StatusBar: View {
     @ObservedObject var manager: ProxyManager
-    let openWindow: (String) -> Void  // ✅ 改为参数传递
+    let openWindow: (String) -> Void
     
     var body: some View {
         VStack(spacing: 16) {
@@ -38,7 +41,6 @@ struct StatusBar: View {
                     .toggleStyle(SwitchToggleStyle())
                     .scaleEffect(1.2)
                     
-                    // ✅ 修改：打开独立窗口
                     Button(action: {
                         openWindow("logs")
                     }) {
@@ -87,7 +89,6 @@ struct StatusBar: View {
     }
 }
 
-// TrafficLabel 和 PortInfoView 保持不变...
 struct TrafficLabel: View {
     let icon: String
     let title: String

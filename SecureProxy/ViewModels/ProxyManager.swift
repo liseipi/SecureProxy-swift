@@ -1,4 +1,4 @@
-// ViewModels/ProxyManager.swift
+// ProxyManager.swift
 import Foundation
 import Combine
 import AppKit
@@ -15,11 +15,11 @@ class ProxyManager: ObservableObject {
     @Published var logs: [String] = []
     @Published var showingLogs = false
     
-    private var process: Process?
+    private var socksServer: SOCKS5Server?
+    private var httpServer: HTTPProxyServer?
     private var configDirectory: URL
-    private var pythonDirectory: URL
-    private var pythonPath: String
     private var timer: Timer?
+    private var statsTimer: Timer?
     
     init() {
         let fm = FileManager.default
@@ -27,21 +27,15 @@ class ProxyManager: ObservableObject {
         
         let baseDir = appSupport.appendingPathComponent("SecureProxy")
         self.configDirectory = baseDir.appendingPathComponent("config")
-        self.pythonDirectory = baseDir.appendingPathComponent("python")
-        
-        self.pythonPath = "/usr/bin/python3"
         
         try? fm.createDirectory(at: configDirectory, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: pythonDirectory, withIntermediateDirectories: true)
         
-        self.pythonPath = findPython()
-        
-        // 请求通知权限
         requestNotificationPermission()
-        
-        copyPythonScripts()
         loadConfigs()
         startTrafficMonitor()
+        
+        addLog("✅ ProxyManager 初始化完成")
+        addLog("🔧 使用纯 Swift 实现的代理客户端")
     }
     
     private func requestNotificationPermission() {
@@ -53,119 +47,7 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    private func findPython() -> String {
-        let paths = [
-            shell("which python3"),
-            "\(NSHomeDirectory())/.pyenv/shims/python3",
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ]
-        
-        let fm = FileManager.default
-        for path in paths {
-            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedPath.isEmpty && fm.fileExists(atPath: trimmedPath) {
-                if checkPythonDependencies(pythonPath: trimmedPath) {
-                    addLog("✅ 找到可用的 Python: \(trimmedPath)")
-                    return trimmedPath
-                } else {
-                    addLog("⚠️ Python 存在但缺少依赖: \(trimmedPath)")
-                }
-            }
-        }
-        
-        addLog("⚠️ 未找到合适的 Python，使用默认路径")
-        return "/usr/bin/python3"
-    }
-    
-    private func shell(_ command: String) -> String {
-        let task = Process()
-        let pipe = Pipe()
-        
-        task.standardOutput = pipe
-        task.standardError = pipe
-        task.arguments = ["-c", command]
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.standardInput = nil
-        
-        var environment = ProcessInfo.processInfo.environment
-        if let home = environment["HOME"] {
-            let pyenvRoot = "\(home)/.pyenv"
-            let path = "\(pyenvRoot)/shims:\(pyenvRoot)/bin:\(environment["PATH"] ?? "")"
-            environment["PATH"] = path
-            task.environment = environment
-        }
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            return ""
-        }
-    }
-    
-    private func checkPythonDependencies(pythonPath: String) -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: pythonPath)
-        task.arguments = ["-c", "import cryptography, websockets"]
-        task.environment = ProcessInfo.processInfo.environment
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0
-        } catch {
-            return false
-        }
-    }
-    
-    private func copyPythonScripts() {
-        let fm = FileManager.default
-        let pythonFiles = ["client.py", "crypto.py", "tls_fingerprint.py"]
-        var copiedCount = 0
-        
-        for file in pythonFiles {
-            let destPath = pythonDirectory.appendingPathComponent(file)
-            try? fm.removeItem(at: destPath)
-            
-            let possiblePaths = [
-                Bundle.main.resourceURL?.appendingPathComponent("Python").appendingPathComponent(file),
-                Bundle.main.resourceURL?.appendingPathComponent(file),
-                Bundle.main.path(forResource: file.replacingOccurrences(of: ".py", with: ""), ofType: "py", inDirectory: "Python").map { URL(fileURLWithPath: $0) },
-                Bundle.main.path(forResource: file.replacingOccurrences(of: ".py", with: ""), ofType: "py").map { URL(fileURLWithPath: $0) }
-            ].compactMap { $0 }
-            
-            var copied = false
-            for sourcePath in possiblePaths {
-                if fm.fileExists(atPath: sourcePath.path) {
-                    do {
-                        try fm.copyItem(at: sourcePath, to: destPath)
-                        addLog("✅ 复制: \(file)")
-                        copiedCount += 1
-                        copied = true
-                        break
-                    } catch {
-                        continue
-                    }
-                }
-            }
-            
-            if !copied {
-                addLog("❌ 未找到: \(file)")
-            }
-        }
-        
-        if copiedCount == 0 {
-            addLog("⚠️ 警告: 未能复制任何 Python 文件")
-        } else {
-            addLog("✅ 复制完成: \(copiedCount)/3 个文件")
-        }
-    }
+    // MARK: - Config Management
     
     func loadConfigs() {
         let fm = FileManager.default
@@ -229,6 +111,8 @@ class ProxyManager: ObservableObject {
         }
     }
     
+    // MARK: - Proxy Control
+    
     func start() {
         guard let config = activeConfig else {
             addLog("❌ 错误: 没有选中的配置")
@@ -238,232 +122,116 @@ class ProxyManager: ObservableObject {
         
         status = .connecting
         addLog("🚀 启动代理...")
+        addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
+        addLog("🔐 使用 AES-256-GCM 加密")
         
-        addLog("🧹 清理残留进程...")
-        killAllClientProcesses()
-        releasePort(config.socksPort)
-        releasePort(config.httpPort)
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.startProxyProcess(config: config)
+        Task {
+            await startProxyServers(config: config)
         }
     }
     
-    private func startProxyProcess(config: ProxyConfig) {
-        // 通过环境变量传递配置 JSON
-        let configDict: [String: Any] = [
-            "name": config.name,
-            "sni_host": config.sniHost,
-            "path": config.path,
-            "server_port": config.serverPort,
-            "socks_port": config.socksPort,
-            "http_port": config.httpPort,
-            "pre_shared_key": config.preSharedKey
-        ]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: configDict, options: []),
-              let configJson = String(data: jsonData, encoding: .utf8) else {
-            addLog("❌ 配置序列化失败")
-            status = .disconnected
-            return
-        }
-        
-        let scriptPath = pythonDirectory.appendingPathComponent("client.py").path
-        
-        process = Process()
-        process?.executableURL = URL(fileURLWithPath: pythonPath)
-        process?.arguments = [scriptPath]
-        process?.currentDirectoryURL = pythonDirectory
-        
-        var environment = ProcessInfo.processInfo.environment
-        
-        // 设置配置到环境变量
-        environment["SECURE_PROXY_CONFIG"] = configJson
-        
-        if let home = environment["HOME"] {
-            let pyenvRoot = "\(home)/.pyenv"
-            let currentPath = environment["PATH"] ?? ""
-            
-            var pathComponents = [
-                "\(pyenvRoot)/shims",
-                "\(pyenvRoot)/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin"
-            ]
-            
-            for component in currentPath.split(separator: ":") {
-                let path = String(component)
-                if !pathComponents.contains(path) {
-                    pathComponents.append(path)
-                }
-            }
-            
-            environment["PATH"] = pathComponents.joined(separator: ":")
-            environment["PYENV_ROOT"] = pyenvRoot
-        }
-        
-        environment["PYTHONUNBUFFERED"] = "1"
-        process?.environment = environment
-        
-        addLog("🐍 Python: \(pythonPath)")
-        addLog("📂 工作目录: \(pythonDirectory.path)")
-        addLog("📄 配置: \(config.name)")
-        addLog("🔧 通过环境变量传递配置")
-        
-        let pipe = Pipe()
-        let errorPipe = Pipe()
-        process?.standardOutput = pipe
-        process?.standardError = errorPipe
-        
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                DispatchQueue.main.async {
-                    self?.parseOutput(output)
-                }
-            }
-        }
-        
-        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                DispatchQueue.main.async {
-                    self?.addLog("❌ 错误: \(output)")
-                }
-            }
-        }
-        
+    @MainActor
+    private func startProxyServers(config: ProxyConfig) async {
         do {
-            try process?.run()
-            isRunning = true
-            status = .connected
-            addLog("✅ 代理进程已启动")
-            addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
-            addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
+            // 创建 SOCKS5 服务器
+            let socks = SOCKS5Server(
+                port: config.socksPort,
+                config: config,
+                onLog: { [weak self] message in
+                    Task { @MainActor in
+                        self?.addLog(message)
+                    }
+                }
+            )
+            
+            try await socks.start()
+            socksServer = socks
+            
+            // 创建 HTTP 代理服务器
+            let http = HTTPProxyServer(
+                port: config.httpPort,
+                config: config,
+                onLog: { [weak self] message in
+                    Task { @MainActor in
+                        self?.addLog(message)
+                    }
+                }
+            )
+            
+            try await http.start()
+            httpServer = http
+            
+            // 更新状态
+            self.isRunning = true
+            self.status = .connected
+            self.addLog("✅ 代理服务启动成功")
+            self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
+            self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
+            
+            self.showNotification(
+                title: "代理已启动",
+                message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
+            )
+            
         } catch {
-            addLog("❌ 启动失败: \(error.localizedDescription)")
-            status = .disconnected
+            self.addLog("❌ 启动失败: \(error.localizedDescription)")
+            self.status = .disconnected
+            self.isRunning = false
         }
     }
     
     func stop() {
         addLog("🛑 停止代理...")
         
-        if let process = process {
-            process.terminate()
-            
-            DispatchQueue.global().async {
-                process.waitUntilExit()
-            }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let pid = process.processIdentifier
-                if pid > 0 {
-                    kill(pid, SIGKILL)
+        Task {
+            if let socks = socksServer {
+                await socks.stop()
+                await MainActor.run {
+                    socksServer = nil
                 }
             }
-        }
-        
-        killAllClientProcesses()
-        
-        if let config = activeConfig {
-            releasePort(config.socksPort)
-            releasePort(config.httpPort)
-        }
-        
-        process = nil
-        isRunning = false
-        status = .disconnected
-        trafficUp = 0
-        trafficDown = 0
-        
-        addLog("✅ 代理已停止")
-    }
-    
-    private func killAllClientProcesses() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-f", "client.py"]
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
             
-            if task.terminationStatus == 0 {
-                addLog("🔪 已清理残留进程")
-            }
-        } catch {
-            // 失败不影响主流程
-        }
-    }
-    
-    private func releasePort(_ port: Int) {
-        let task = Process()
-        let pipe = Pipe()
-        
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
-        task.arguments = ["-ti", ":\(port)"]
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .components(separatedBy: .newlines)
-                    .compactMap { Int($0) }
-                
-                for pid in pids {
-                    kill(pid_t(pid), SIGKILL)
-                    addLog("🔪 释放端口 \(port) (PID: \(pid))")
+            if let http = httpServer {
+                await http.stop()
+                await MainActor.run {
+                    httpServer = nil
                 }
             }
-        } catch {
-            // 失败不影响主流程
+            
+            await MainActor.run {
+                self.isRunning = false
+                self.status = .disconnected
+                self.trafficUp = 0
+                self.trafficDown = 0
+                self.addLog("✅ 代理已停止")
+            }
         }
     }
     
     func forceCleanup() {
         addLog("🧹 开始强制清理...")
-        
-        killAllClientProcesses()
-        
-        if let config = activeConfig {
-            releasePort(config.socksPort)
-            releasePort(config.httpPort)
-        }
-        
-        releasePort(1080)
-        releasePort(1081)
-        
-        process = nil
-        isRunning = false
-        status = .disconnected
-        
+        stop()
         addLog("✅ 清理完成")
     }
     
-    private func parseOutput(_ output: String) {
-        addLog(output)
-        
-        if output.contains("隧道建立成功") ||
-           output.contains("✅ SOCKS5") ||
-           output.contains("✅ HTTP") {
-            status = .connected
-        }
-    }
+    // MARK: - Traffic Monitor
     
     private func startTrafficMonitor() {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.isRunning else { return }
+            guard let self = self else { return }
             
-            self.trafficUp = Double.random(in: 0...100)
-            self.trafficDown = Double.random(in: 0...100)
+            // 在主线程更新 UI
+            DispatchQueue.main.async {
+                guard self.isRunning else { return }
+                
+                // 模拟流量数据（实际应从连接中获取）
+                self.trafficUp = Double.random(in: 0...100)
+                self.trafficDown = Double.random(in: 0...100)
+            }
         }
     }
+    
+    // MARK: - Logging
     
     private func addLog(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
@@ -478,9 +246,8 @@ class ProxyManager: ObservableObject {
         addLog("日志已清除")
     }
     
-    // MARK: - 导入导出功能
+    // MARK: - Import/Export
     
-    /// 导出单个配置到文件
     func exportConfig(_ config: ProxyConfig) {
         let savePanel = NSSavePanel()
         savePanel.title = "导出配置"
@@ -509,7 +276,6 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    /// 导出所有配置到文件
     func exportAllConfigs() {
         guard !configs.isEmpty else {
             addLog("⚠️ 没有可导出的配置")
@@ -543,7 +309,6 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    /// 导入配置文件
     func importConfig() {
         let openPanel = NSOpenPanel()
         openPanel.title = "导入配置"
@@ -558,15 +323,11 @@ class ProxyManager: ObservableObject {
                 let data = try Data(contentsOf: url)
                 let decoder = JSONDecoder()
                 
-                // 尝试解析为单个配置
                 if let config = try? decoder.decode(ProxyConfig.self, from: data) {
                     self.importSingleConfig(config)
-                }
-                // 尝试解析为配置数组
-                else if let configsArray = try? decoder.decode([ProxyConfig].self, from: data) {
+                } else if let configsArray = try? decoder.decode([ProxyConfig].self, from: data) {
                     self.importMultipleConfigs(configsArray)
-                }
-                else {
+                } else {
                     throw NSError(domain: "ImportError", code: 1,
                                 userInfo: [NSLocalizedDescriptionKey: "无效的配置文件格式"])
                 }
@@ -579,20 +340,14 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - 私有辅助方法
-    
     private func importSingleConfig(_ config: ProxyConfig) {
         var newConfig = config
         
-        // 检查名称冲突
         if configs.contains(where: { $0.name == config.name }) {
             newConfig.name = "\(config.name) (导入)"
         }
         
-        // 生成新的 ID
         newConfig.id = UUID()
-        
-        // 保存配置
         saveConfig(newConfig)
         
         DispatchQueue.main.async {
@@ -607,15 +362,11 @@ class ProxyManager: ObservableObject {
         for config in configsArray {
             var newConfig = config
             
-            // 检查名称冲突
             if configs.contains(where: { $0.name == config.name }) {
                 newConfig.name = "\(config.name) (导入)"
             }
             
-            // 生成新的 ID
             newConfig.id = UUID()
-            
-            // 保存配置
             saveConfig(newConfig)
             importedCount += 1
         }
@@ -646,11 +397,17 @@ class ProxyManager: ObservableObject {
     }
     
     deinit {
-        killAllClientProcesses()
-        if let config = activeConfig {
-            releasePort(config.socksPort)
-            releasePort(config.httpPort)
-        }
         timer?.invalidate()
+        statsTimer?.invalidate()
+        
+        // 同步清理
+        Task { @MainActor in
+            if let socks = socksServer {
+                await socks.stop()
+            }
+            if let http = httpServer {
+                await http.stop()
+            }
+        }
     }
 }

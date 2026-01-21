@@ -6,8 +6,19 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		887F927F2F21169500CDA419 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887F927E2F21169500CDA419 /* Network.framework */; };
+		887F92812F21169F00CDA419 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887F92802F21169F00CDA419 /* CryptoKit.framework */; };
+		887F92832F2116A700CDA419 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887F92822F2116A700CDA419 /* SwiftUI.framework */; };
+		887F92852F2116B000CDA419 /* Combine.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887F92842F2116B000CDA419 /* Combine.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		887F541E2ED83D7400DC92AB /* SecureProxy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SecureProxy.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		887F927E2F21169500CDA419 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.1.sdk/System/Library/Frameworks/Network.framework; sourceTree = DEVELOPER_DIR; };
+		887F92802F21169F00CDA419 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.1.sdk/System/Library/Frameworks/CryptoKit.framework; sourceTree = DEVELOPER_DIR; };
+		887F92822F2116A700CDA419 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.1.sdk/System/Library/Frameworks/SwiftUI.framework; sourceTree = DEVELOPER_DIR; };
+		887F92842F2116B000CDA419 /* Combine.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Combine.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.1.sdk/System/Library/Frameworks/Combine.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -23,6 +34,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				887F92812F21169F00CDA419 /* CryptoKit.framework in Frameworks */,
+				887F92832F2116A700CDA419 /* SwiftUI.framework in Frameworks */,
+				887F92852F2116B000CDA419 /* Combine.framework in Frameworks */,
+				887F927F2F21169500CDA419 /* Network.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -33,6 +48,7 @@
 			isa = PBXGroup;
 			children = (
 				887F54202ED83D7400DC92AB /* SecureProxy */,
+				887F927D2F21169500CDA419 /* Frameworks */,
 				887F541F2ED83D7400DC92AB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -43,6 +59,17 @@
 				887F541E2ED83D7400DC92AB /* SecureProxy.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		887F927D2F21169500CDA419 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				887F92842F2116B000CDA419 /* Combine.framework */,
+				887F92822F2116A700CDA419 /* SwiftUI.framework */,
+				887F92802F21169F00CDA419 /* CryptoKit.framework */,
+				887F927E2F21169500CDA419 /* Network.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -274,7 +301,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.1;
 			};
@@ -315,7 +342,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.1;
 			};

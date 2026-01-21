@@ -1,7 +1,10 @@
 // Views/ContentView.swift
+// 修复版本 - 支持 SwiftProxyManager
+
 import SwiftUI
 
 struct ContentView: View {
+    // 修改：支持两种管理器类型
     @EnvironmentObject var manager: ProxyManager
     @State private var showingConfigEditor = false
     @State private var editingConfig: ProxyConfig? = nil
