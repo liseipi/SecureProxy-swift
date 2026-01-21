@@ -2,7 +2,7 @@ import SwiftUI
 
 // ✅ 新增：日志窗口包装器
 struct LogsWindowView: View {
-    @EnvironmentObject var manager: SwiftProxyManager
+    @EnvironmentObject var manager: ProxyManager
     
     var body: some View {
         LogsView(logs: manager.logs, onClear: {

@@ -34,7 +34,7 @@ class ProxyManager: ObservableObject {
         loadConfigs()
         startTrafficMonitor()
         
-        addLog("✅ ProxyManager 初始化完成")
+        addLog("✅ SwiftProxyManager 初始化完成")
         addLog("🔧 使用纯 Swift 实现的代理客户端")
     }
     
@@ -397,15 +397,19 @@ class ProxyManager: ObservableObject {
     }
     
     deinit {
-        timer?.invalidate()
-        statsTimer?.invalidate()
+//        timer?.invalidate()
+//        statsTimer?.invalidate()
         
-        // 同步清理
+        // 捕获服务器实例的本地副本，避免在闭包中捕获 self
+        let socks = socksServer
+        let http = httpServer
+        
+        // 异步清理
         Task { @MainActor in
-            if let socks = socksServer {
+            if let socks = socks {
                 await socks.stop()
             }
-            if let http = httpServer {
+            if let http = http {
                 await http.stop()
             }
         }

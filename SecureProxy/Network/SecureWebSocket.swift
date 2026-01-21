@@ -54,8 +54,8 @@ actor SecureWebSocket {
         let parameters = NWParameters(tls: tlsOptions)
         
         // 修复：正确添加 WebSocket 协议
-        let wsProtocol = NWProtocolWebSocket.definition(options: wsOptions)
-        parameters.defaultProtocolStack.applicationProtocols.insert(wsProtocol, at: 0)
+        let wsDefinition = NWProtocolWebSocket.definition
+        parameters.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)
         
         // 创建连接
         connection = NWConnection(
@@ -107,7 +107,7 @@ actor SecureWebSocket {
     // MARK: - Key Exchange & Authentication
     
     private func setupKeys() async throws {
-        guard let connection = connection else {
+        guard connection != nil else {
             throw WebSocketError.notConnected
         }
         
@@ -393,26 +393,6 @@ enum WebSocketError: Error {
             return "Connection failed: \(reason)"
         case .noData:
             return "No data received"
-        }
-    }
-}
-
-enum CryptoError: Error {
-    case invalidDataLength
-    case encryptionFailed
-    case decryptionFailed
-    case invalidNonce
-    
-    var localizedDescription: String {
-        switch self {
-        case .invalidDataLength:
-            return "Invalid data length for decryption"
-        case .encryptionFailed:
-            return "Encryption failed"
-        case .decryptionFailed:
-            return "Decryption failed"
-        case .invalidNonce:
-            return "Invalid nonce"
         }
     }
 }
