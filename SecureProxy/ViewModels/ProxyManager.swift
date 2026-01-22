@@ -1,4 +1,4 @@
-// ProxyManager.swift - 修复通知权限
+// ProxyManager.swift - 添加 URL 格式导入/导出支持
 import Foundation
 import Combine
 import AppKit
@@ -39,13 +39,11 @@ class ProxyManager: ObservableObject {
         addLog("🔧 使用纯 Swift 实现的代理客户端")
     }
     
-    // 🔧 修复：改进通知权限请求
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    // 不再将通知错误记录为严重问题
                     print("⚠️ 通知权限: \(error.localizedDescription)")
                     self?.notificationsEnabled = false
                 } else if granted {
@@ -146,7 +144,6 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
-            // 创建 SOCKS5 服务器
             let socks = SOCKS5Server(
                 port: config.socksPort,
                 config: config,
@@ -160,7 +157,6 @@ class ProxyManager: ObservableObject {
             try await socks.start()
             socksServer = socks
             
-            // 创建 HTTP 代理服务器
             let http = HTTPProxyServer(
                 port: config.httpPort,
                 config: config,
@@ -174,14 +170,12 @@ class ProxyManager: ObservableObject {
             try await http.start()
             httpServer = http
             
-            // 更新状态
             self.isRunning = true
             self.status = .connected
             self.addLog("✅ 代理服务启动成功")
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
             
-            // 只在有权限时发送通知
             if notificationsEnabled {
                 self.showNotification(
                     title: "代理已启动",
@@ -239,7 +233,6 @@ class ProxyManager: ObservableObject {
             DispatchQueue.main.async {
                 guard self.isRunning else { return }
                 
-                // 模拟流量数据
                 self.trafficUp = Double.random(in: 0...100)
                 self.trafficDown = Double.random(in: 0...100)
             }
@@ -261,7 +254,62 @@ class ProxyManager: ObservableObject {
         addLog("🗑️ 日志已清除")
     }
     
-    // MARK: - Import/Export
+    // MARK: - Import/Export (URL Format)
+    
+    /// 复制配置链接到剪贴板
+    func copyConfigURL(_ config: ProxyConfig) {
+        let urlString = config.toURLString()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(urlString, forType: .string)
+        
+        addLog("📋 已复制配置链接: \(config.name)")
+        if notificationsEnabled {
+            showNotification(title: "复制成功", message: "配置链接已复制到剪贴板")
+        }
+    }
+    
+    /// 从剪贴板导入配置
+    func importFromClipboard() {
+        let pasteboard = NSPasteboard.general
+        guard let urlString = pasteboard.string(forType: .string) else {
+            addLog("❌ 剪贴板中没有文本")
+            return
+        }
+        
+        importFromURLString(urlString)
+    }
+    
+    /// 从 URL 字符串导入配置
+    func importFromURLString(_ urlString: String) {
+        guard let config = ProxyConfig.from(urlString: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            addLog("❌ 无效的配置链接格式")
+            addLog("正确格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy")
+            return
+        }
+        
+        var newConfig = config
+        
+        // 检查名称冲突
+        if configs.contains(where: { $0.name == config.name }) {
+            newConfig.name = "\(config.name) (导入)"
+        }
+        
+        newConfig.id = UUID()
+        saveConfig(newConfig)
+        
+        addLog("✅ 成功导入配置: \(newConfig.name)")
+        if notificationsEnabled {
+            showNotification(title: "导入成功", message: "配置 \(newConfig.name) 已导入")
+        }
+    }
+    
+    /// 显示配置链接
+    func showConfigURL(_ config: ProxyConfig) -> String {
+        return config.toURLString()
+    }
+    
+    // MARK: - Import/Export (Legacy JSON Format)
     
     func exportConfig(_ config: ProxyConfig) {
         let savePanel = NSSavePanel()
@@ -400,7 +448,6 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    // 🔧 修复：只在有权限时发送通知
     private func showNotification(title: String, message: String) {
         guard notificationsEnabled else { return }
         
@@ -423,8 +470,6 @@ class ProxyManager: ObservableObject {
     }
     
     deinit {
-//        timer?.invalidate()
-        
         let socks = socksServer
         let http = httpServer
         
