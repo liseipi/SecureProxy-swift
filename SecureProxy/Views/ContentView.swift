@@ -1,5 +1,5 @@
 // Views/ContentView.swift
-// 优化版本 - 明确区分复制链接和导出文件
+// 支持 proxy_ip 的导入导出
 
 import SwiftUI
 
@@ -39,8 +39,8 @@ struct ContentView: View {
                                 }
                             },
                             onDelete: { manager.deleteConfig(config) },
-                            onExport: { manager.exportConfig(config) },  // 导出 JSON 文件
-                            onCopyURL: { manager.copyConfigURL(config) }  // 复制链接到剪贴板
+                            onExport: { manager.exportConfig(config) },
+                            onCopyURL: { manager.copyConfigURL(config) }
                         )
                     }
                 }
@@ -125,6 +125,7 @@ struct ContentView: View {
         let newConfig = ProxyConfig(
             name: "新配置",
             sniHost: "example.com",
+            proxyIP: "example.com",  // 新增: 默认与 sniHost 相同（直连模式）
             path: "/ws",
             serverPort: 443,
             socksPort: 1080,
@@ -196,7 +197,7 @@ struct URLImportSheet: View {
                 Text("粘贴配置链接")
                     .font(.headline)
                 
-                Text("格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy")
+                Text("格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
@@ -233,7 +234,7 @@ struct URLImportSheet: View {
                 Text("示例链接")
                     .font(.headline)
                 
-                Text("wss://example.com:443/ws?psk=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&socks=1080&http=1081&name=MyProxy")
+                Text("wss://example.com:443/ws?psk=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)

@@ -3,6 +3,7 @@ import SwiftUI
 struct ConfigEditor: View {
     @State private var name: String
     @State private var sniHost: String
+    @State private var proxyIP: String  // 新增
     @State private var path: String
     @State private var serverPort: Int
     @State private var socksPort: Int
@@ -18,6 +19,7 @@ struct ConfigEditor: View {
         self.originalConfig = config
         _name = State(initialValue: config.name)
         _sniHost = State(initialValue: config.sniHost)
+        _proxyIP = State(initialValue: config.proxyIP)  // 新增
         _path = State(initialValue: config.path)
         _serverPort = State(initialValue: config.serverPort)
         _socksPort = State(initialValue: config.socksPort)
@@ -67,11 +69,60 @@ struct ConfigEditor: View {
                         }
                         
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("SNI 主机名")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                            HStack {
+                                Text("SNI 主机名")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button(action: {
+                                    proxyIP = sniHost
+                                }) {
+                                    Text("同步到代理地址")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                            }
                             TextField("例: example.com", text: $sniHost)
                                 .textFieldStyle(.roundedBorder)
+                            Text("用于 TLS 握手的域名")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("代理地址 (Proxy IP)")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                if proxyIP == sniHost {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.green)
+                                        Text("直连模式")
+                                            .font(.caption)
+                                            .foregroundColor(.green)
+                                    }
+                                } else if isIPAddress(proxyIP) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "network")
+                                            .foregroundColor(.blue)
+                                        Text("CDN 模式")
+                                            .font(.caption)
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                            }
+                            TextField("例: 1.1.1.1 或 example.com", text: $proxyIP)
+                                .textFieldStyle(.roundedBorder)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("• 与 SNI 相同时直连域名")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("• 填写 IP 地址时使用 CDN 优选 IP 连接")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                         
                         VStack(alignment: .leading, spacing: 8) {
@@ -214,7 +265,7 @@ struct ConfigEditor: View {
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(width: 600, height: 700)
+        .frame(width: 600, height: 750)
         .sheet(isPresented: $showingURLSheet) {
             ConfigURLView(config: currentConfig)
         }
@@ -223,6 +274,7 @@ struct ConfigEditor: View {
     private var isValidConfig: Bool {
         !name.isEmpty &&
         !sniHost.isEmpty &&
+        !proxyIP.isEmpty &&  // 新增验证
         !path.isEmpty &&
         serverPort >= 1 && serverPort <= 65535 &&
         socksPort >= 1024 && socksPort <= 65535 &&
@@ -236,6 +288,7 @@ struct ConfigEditor: View {
             id: originalConfig.id,
             name: name,
             sniHost: sniHost,
+            proxyIP: proxyIP,  // 新增
             path: path,
             serverPort: serverPort,
             socksPort: socksPort,
@@ -251,6 +304,20 @@ struct ConfigEditor: View {
     private func generatePSK() -> String {
         let bytes = (0..<32).map { _ in UInt8.random(in: 0...255) }
         return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    private func isIPAddress(_ str: String) -> Bool {
+        // 简单的 IP 地址检测（支持 IPv4 和 IPv6）
+        let ipv4Pattern = "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        let ipv6Pattern = "^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
+        
+        if str.range(of: ipv4Pattern, options: .regularExpression) != nil {
+            return true
+        }
+        if str.range(of: ipv6Pattern, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 }
 

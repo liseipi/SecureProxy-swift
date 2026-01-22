@@ -4,6 +4,7 @@ struct ProxyConfig: Codable, Identifiable, Equatable {
     var id = UUID()
     var name: String
     var sniHost: String
+    var proxyIP: String  // 新增: 代理 IP (可以是域名或 IP 地址)
     var path: String
     var serverPort: Int
     var socksPort: Int
@@ -13,6 +14,7 @@ struct ProxyConfig: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case name
         case sniHost = "sni_host"
+        case proxyIP = "proxy_ip"  // 新增
         case path
         case serverPort = "server_port"
         case socksPort = "socks_port"
@@ -27,7 +29,7 @@ struct ProxyConfig: Codable, Identifiable, Equatable {
     // MARK: - URL Format Support
     
     /// 导出为 URL 字符串格式
-    /// 格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy
+    /// 格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1
     func toURLString() -> String {
         var components = URLComponents()
         components.scheme = "wss"
@@ -39,14 +41,15 @@ struct ProxyConfig: Codable, Identifiable, Equatable {
             URLQueryItem(name: "psk", value: preSharedKey),
             URLQueryItem(name: "socks", value: String(socksPort)),
             URLQueryItem(name: "http", value: String(httpPort)),
-            URLQueryItem(name: "name", value: name)
+            URLQueryItem(name: "name", value: name),
+            URLQueryItem(name: "proxy_ip", value: proxyIP)  // 新增
         ]
         
         return components.url?.absoluteString ?? ""
     }
     
     /// 从 URL 字符串格式导入
-    /// 格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy
+    /// 格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1
     static func from(urlString: String) -> ProxyConfig? {
         guard let url = URL(string: urlString),
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
@@ -83,10 +86,12 @@ struct ProxyConfig: Codable, Identifiable, Equatable {
         let socksPort = Int(queryDict["socks"] ?? "1080") ?? 1080
         let httpPort = Int(queryDict["http"] ?? "1081") ?? 1081
         let name = queryDict["name"] ?? host
+        let proxyIP = queryDict["proxy_ip"] ?? host  // 新增: 如果没有指定 proxy_ip,默认等于 sni_host
         
         return ProxyConfig(
             name: name,
             sniHost: host,
+            proxyIP: proxyIP,  // 新增
             path: path,
             serverPort: port,
             socksPort: socksPort,

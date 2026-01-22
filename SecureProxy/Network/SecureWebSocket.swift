@@ -1,5 +1,5 @@
-// SecureWebSocket.swift - 使用原始 TLS + 手动 WebSocket 握手
-// 完全模拟 Node.js ws 库的行为
+// SecureWebSocket.swift - 支持 Cloudflare CDN 优选 IP
+// 根据 proxy_ip 智能选择连接方式
 import Foundation
 import Network
 import CryptoKit
@@ -21,9 +21,17 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
-        // let wsUrl = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
-        // print("🔗 连接到: \(wsUrl)")
-        // print("📡 SNI Host: \(config.sniHost)")
+        // 🔧 判断连接方式
+        let useCDN = config.sniHost != config.proxyIP
+        
+        let actualHost: String
+        if useCDN {
+            actualHost = config.proxyIP
+            print("🌐 使用 CDN 优选 IP: \(config.proxyIP)")
+        } else {
+            actualHost = config.sniHost
+            print("🔗 直连域名: \(config.sniHost)")
+        }
         
         // 🔧 使用纯 TLS 连接，不使用 NWProtocolWebSocket
         let tlsOptions = NWProtocolTLS.Options()
@@ -37,7 +45,7 @@ actor SecureWebSocket {
             DispatchQueue.global()
         )
         
-        // 设置 SNI
+        // 设置 SNI (始终使用 sni_host 作为 SNI)
         sec_protocol_options_set_tls_server_name(
             tlsOptions.securityProtocolOptions,
             config.sniHost
@@ -47,8 +55,8 @@ actor SecureWebSocket {
         let parameters = NWParameters(tls: tlsOptions)
         parameters.allowLocalEndpointReuse = true
         
-        // 创建连接
-        let host = NWEndpoint.Host(config.sniHost)
+        // 创建连接 (使用 actualHost 作为连接地址)
+        let host = NWEndpoint.Host(actualHost)
         let port = NWEndpoint.Port(integerLiteral: UInt16(config.serverPort))
         
         connection = NWConnection(host: host, port: port, using: parameters)
@@ -73,7 +81,7 @@ actor SecureWebSocket {
         }
         
         // TLS 连接成功后，执行 WebSocket 握手
-        // print("✅ TLS 连接就绪")
+        print("✅ TLS 连接就绪")
         try await performWebSocketHandshake()
         
         // WebSocket 握手成功后，执行密钥交换
@@ -85,12 +93,12 @@ actor SecureWebSocket {
     // MARK: - WebSocket Handshake
     
     private func performWebSocketHandshake() async throws {
-        // print("🤝 开始 WebSocket 握手...")
+        print("🤝 开始 WebSocket 握手...")
         
         // 生成 WebSocket Key
         let wsKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
         
-        // 构建 WebSocket 握手请求
+        // 构建 WebSocket 握手请求 (Host 始终使用 sni_host)
         var request = "GET \(config.path) HTTP/1.1\r\n"
         request += "Host: \(config.sniHost)\r\n"
         request += "Upgrade: websocket\r\n"
@@ -102,11 +110,9 @@ actor SecureWebSocket {
         
         // 发送握手请求
         try await sendRawTCP(request.data(using: .utf8)!)
-        // print("📤 已发送 WebSocket 握手请求")
         
         // 读取握手响应
         let response = try await readHTTPResponse()
-        // print("📥 收到握手响应: \(response.prefix(100))...")
         
         // 验证握手响应
         guard response.contains("HTTP/1.1 101") || response.contains("HTTP/1.0 101") else {
@@ -145,16 +151,14 @@ actor SecureWebSocket {
             throw WebSocketError.notConnected
         }
         
-        // print("🔑 开始密钥交换...")
+        print("🔑 开始密钥交换...")
         
         // 1. 生成并发送客户端公钥
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
         try await sendWebSocketBinary(clientPub)
-        // print("📤 已发送客户端公钥 (\(clientPub.count) bytes)")
         
         // 2. 接收服务器公钥
         let serverPub = try await recvWebSocketBinary()
-        // print("📥 已接收服务器公钥 (\(serverPub.count) bytes)")
         
         guard serverPub.count == 32 else {
             throw WebSocketError.invalidServerKey
@@ -171,13 +175,12 @@ actor SecureWebSocket {
         let keys = deriveKeys(sharedKey: psk, salt: salt)
         sendKey = keys.sendKey
         recvKey = keys.recvKey
-        // print("🔐 密钥派生完成")
+        print("🔐 密钥派生完成")
         
         // 4. 发送认证
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
         try await sendWebSocketBinary(challenge)
-        // print("📤 已发送认证请求")
         
         // 5. 验证响应
         let authResponse = try await recvWebSocketBinary()
@@ -201,12 +204,10 @@ actor SecureWebSocket {
         let message = "CONNECT \(target)".data(using: .utf8)!
         let encrypted = try encrypt(key: sendKey, plaintext: message)
         
-        // print("📤 发送 CONNECT: \(target)")
         try await sendWebSocketBinary(encrypted)
         
         let response = try await recv()
         let responseStr = String(data: response, encoding: .utf8) ?? ""
-        // print("📥 收到响应: \(responseStr)")
         
         guard responseStr.starts(with: "OK") else {
             throw WebSocketError.connectionFailed(responseStr)
@@ -509,7 +510,6 @@ private actor ConnectionStateHandler {
             continuation = nil
             
         case .waiting(let error):
-            // print("⚠️ TLS 等待中: \(error)")
             let nsError = error as NSError
             if nsError.domain == NSPOSIXErrorDomain && nsError.code == 53 {
                 hasCompleted = true
@@ -518,10 +518,8 @@ private actor ConnectionStateHandler {
             }
             
         case .preparing:
-            // print("🔄 TLS 准备中...")
             break
         case .setup:
-            // print("🔧 TLS 设置中...")
             break
         case .cancelled:
             hasCompleted = true

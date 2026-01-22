@@ -1,5 +1,5 @@
 // Views/ConfigRow.swift
-// 兼容版本 - onCopyURL 参数可选
+// 支持显示 proxy_ip 信息
 import SwiftUI
 
 struct ConfigRow: View {
@@ -9,7 +9,7 @@ struct ConfigRow: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onExport: () -> Void
-    var onCopyURL: (() -> Void)? = nil  // 可选参数，向后兼容
+    var onCopyURL: (() -> Void)? = nil
     
     @State private var showingDeleteAlert = false
     
@@ -27,22 +27,48 @@ struct ConfigRow: View {
                     }
                 }
                 
-                Text(config.sniHost)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                // SNI Host
+                HStack(spacing: 4) {
+                    Image(systemName: "network")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(config.sniHost)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
                 
+                // Proxy IP (新增)
+                HStack(spacing: 4) {
+                    if config.sniHost == config.proxyIP {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                        Text("直连")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    } else {
+                        Image(systemName: "server.rack")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                        Text("CDN: \(config.proxyIP)")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+                }
+                
+                // 端口信息
                 HStack(spacing: 16) {
                     Label("\(config.socksPort)", systemImage: "s.circle.fill")
                     Label("\(config.httpPort)", systemImage: "h.circle.fill")
                 }
                 .font(.caption)
-                .foregroundColor(.blue)
+                .foregroundColor(.orange)
             }
             
             Spacer()
             
             HStack(spacing: 12) {
-                // 复制链接按钮 - 只有提供了回调才显示
+                // 复制链接按钮
                 if let copyAction = onCopyURL {
                     Button(action: copyAction) {
                         Image(systemName: "link.circle.fill")
