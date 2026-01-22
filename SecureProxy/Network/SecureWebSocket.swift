@@ -1,4 +1,5 @@
-// SecureWebSocket.swift - 修复版
+// SecureWebSocket.swift - 使用原始 TLS + 手动 WebSocket 握手
+// 完全模拟 Node.js ws 库的行为
 import Foundation
 import Network
 import CryptoKit
@@ -11,6 +12,7 @@ actor SecureWebSocket {
     private var isConnected = false
     private var messageQueue: [Data] = []
     private var messageContinuation: CheckedContinuation<Data, Error>?
+    private var wsHandshakeComplete = false
     
     init(config: ProxyConfig) {
         self.config = config
@@ -19,12 +21,14 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
-        let host = NWEndpoint.Host(config.sniHost)
-        let port = NWEndpoint.Port(integerLiteral: UInt16(config.serverPort))
+        let wsUrl = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
+        print("🔗 连接到: \(wsUrl)")
+        print("📡 SNI Host: \(config.sniHost)")
         
-        // 配置 TLS
+        // 🔧 使用纯 TLS 连接，不使用 NWProtocolWebSocket
         let tlsOptions = NWProtocolTLS.Options()
         
+        // 允许自签名证书
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
             { _, _, completion in
@@ -33,100 +37,104 @@ actor SecureWebSocket {
             DispatchQueue.global()
         )
         
+        // 设置 SNI
         sec_protocol_options_set_tls_server_name(
             tlsOptions.securityProtocolOptions,
             config.sniHost
         )
         
-        // 🔧 修复：正确配置 WebSocket
-        let wsOptions = NWProtocolWebSocket.Options()
-        wsOptions.autoReplyPing = true
-        
-        // 设置 WebSocket 路径
-        wsOptions.setAdditionalHeaders([
-            ("Host", config.sniHost),
-            ("User-Agent", "SecureProxy-Swift/2.0"),
-            ("Upgrade", "websocket"),
-            ("Connection", "Upgrade")
-        ])
-        
-        // 🔧 修复：创建正确的参数配置
+        // 🔧 关键：只使用 TLS，不添加 WebSocket 协议层
         let parameters = NWParameters(tls: tlsOptions)
-        
-        // 🔧 修复：正确的方式添加 WebSocket 协议
-        let websocketOptions = NWProtocolWebSocket.Options()
-        websocketOptions.autoReplyPing = true
-        
-        // 设置 WebSocket 请求路径
-        if !config.path.isEmpty {
-            // 构造完整的 WebSocket URL
-            let urlString = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
-            if let url = URL(string: urlString) {
-                websocketOptions.setAdditionalHeaders([
-                    ("Host", config.sniHost),
-                    ("Origin", "https://\(config.sniHost)"),
-                    ("User-Agent", "SecureProxy-Swift/2.0")
-                ])
-            }
-        }
-        
-        // 添加 WebSocket 到协议栈
-        parameters.defaultProtocolStack.applicationProtocols.insert(websocketOptions, at: 0)
+        parameters.allowLocalEndpointReuse = true
         
         // 创建连接
+        let host = NWEndpoint.Host(config.sniHost)
+        let port = NWEndpoint.Port(integerLiteral: UInt16(config.serverPort))
+        
         connection = NWConnection(host: host, port: port, using: parameters)
         
-        // 启动连接
-        return try await withCheckedThrowingContinuation { continuation in
-            connection?.stateUpdateHandler = { [weak self] state in
+        // 等待 TLS 连接建立
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let stateHandler = ConnectionStateHandler(continuation: continuation)
+            
+            connection?.stateUpdateHandler = { state in
                 Task {
-                    await self?.handleConnectionState(state, continuation: continuation)
+                    await stateHandler.handleState(state)
                 }
             }
             
             connection?.start(queue: .global())
+            
+            // 超时处理
+            Task {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                await stateHandler.timeout()
+            }
         }
+        
+        // TLS 连接成功后，执行 WebSocket 握手
+        print("✅ TLS 连接就绪")
+        try await performWebSocketHandshake()
+        
+        // WebSocket 握手成功后，执行密钥交换
+        try await setupKeys()
+        isConnected = true
+        startReceiving()
     }
     
-    private func handleConnectionState(
-        _ state: NWConnection.State,
-        continuation: CheckedContinuation<Void, Error>
-    ) {
-        switch state {
-        case .ready:
-            print("✅ WebSocket 连接就绪")
-            Task {
-                do {
-                    try await setupKeys()
-                    isConnected = true
-                    continuation.resume()
-                    startReceiving()
-                } catch {
-                    print("❌ 密钥交换失败: \(error)")
-                    continuation.resume(throwing: error)
-                }
+    // MARK: - WebSocket Handshake
+    
+    private func performWebSocketHandshake() async throws {
+        print("🤝 开始 WebSocket 握手...")
+        
+        // 生成 WebSocket Key
+        let wsKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
+        
+        // 构建 WebSocket 握手请求
+        var request = "GET \(config.path) HTTP/1.1\r\n"
+        request += "Host: \(config.sniHost)\r\n"
+        request += "Upgrade: websocket\r\n"
+        request += "Connection: Upgrade\r\n"
+        request += "Sec-WebSocket-Key: \(wsKey)\r\n"
+        request += "Sec-WebSocket-Version: 13\r\n"
+        request += "User-Agent: SecureProxy-Swift/2.0\r\n"
+        request += "\r\n"
+        
+        // 发送握手请求
+        try await sendRawTCP(request.data(using: .utf8)!)
+        print("📤 已发送 WebSocket 握手请求")
+        
+        // 读取握手响应
+        let response = try await readHTTPResponse()
+        print("📥 收到握手响应: \(response.prefix(100))...")
+        
+        // 验证握手响应
+        guard response.contains("HTTP/1.1 101") || response.contains("HTTP/1.0 101") else {
+            print("❌ WebSocket 握手失败: \(response)")
+            throw WebSocketError.handshakeFailed
+        }
+        
+        wsHandshakeComplete = true
+        print("✅ WebSocket 握手成功")
+    }
+    
+    private func readHTTPResponse() async throws -> String {
+        var buffer = Data()
+        
+        // 读取直到遇到 \r\n\r\n（HTTP 头结束标志）
+        while true {
+            let chunk = try await recvRawTCP(maxLength: 1024)
+            buffer.append(chunk)
+            
+            if let str = String(data: buffer, encoding: .utf8),
+               str.contains("\r\n\r\n") {
+                return str
             }
             
-        case .failed(let error):
-            print("❌ WebSocket 连接失败: \(error)")
-            continuation.resume(throwing: error)
-            
-        case .waiting(let error):
-            print("⚠️ WebSocket 等待中: \(error)")
-            // 不要在 waiting 状态终止，继续等待
-            
-        case .preparing:
-            print("🔄 WebSocket 准备中...")
-            
-        case .setup:
-            print("🔧 WebSocket 设置中...")
-            
-        case .cancelled:
-            print("🛑 WebSocket 已取消")
-            continuation.resume(throwing: WebSocketError.notConnected)
-            
-        @unknown default:
-            print("⚠️ 未知状态: \(state)")
+            // 防止无限读取
+            if buffer.count > 4096 {
+                throw WebSocketError.handshakeFailed
+            }
         }
     }
     
@@ -139,35 +147,40 @@ actor SecureWebSocket {
         
         print("🔑 开始密钥交换...")
         
-        // 1. 生成客户端公钥
+        // 1. 生成并发送客户端公钥
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
-        try await sendRaw(clientPub)
-        print("📤 已发送客户端公钥")
+        try await sendWebSocketBinary(clientPub)
+        print("📤 已发送客户端公钥 (\(clientPub.count) bytes)")
         
         // 2. 接收服务器公钥
-        let serverPub = try await recvRaw()
+        let serverPub = try await recvWebSocketBinary()
+        print("📥 已接收服务器公钥 (\(serverPub.count) bytes)")
+        
         guard serverPub.count == 32 else {
             throw WebSocketError.invalidServerKey
         }
-        print("📥 已接收服务器公钥")
         
-        // 3. 派生密钥
+        // 3. 密钥派生
         let salt = clientPub + serverPub
         let psk = hexToData(config.preSharedKey)
-        let keys = deriveKeys(sharedKey: psk, salt: salt)
         
+        guard psk.count == 32 else {
+            throw WebSocketError.invalidPSK
+        }
+        
+        let keys = deriveKeys(sharedKey: psk, salt: salt)
         sendKey = keys.sendKey
         recvKey = keys.recvKey
         print("🔐 密钥派生完成")
         
-        // 4. 认证
+        // 4. 发送认证
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
-        try await sendRaw(challenge)
+        try await sendWebSocketBinary(challenge)
         print("📤 已发送认证请求")
         
         // 5. 验证响应
-        let authResponse = try await recvRaw()
+        let authResponse = try await recvWebSocketBinary()
         let okMessage = "ok".data(using: .utf8)!
         let expected = hmacSHA256(key: keys.recvKey, message: okMessage)
         
@@ -188,11 +201,12 @@ actor SecureWebSocket {
         let message = "CONNECT \(target)".data(using: .utf8)!
         let encrypted = try encrypt(key: sendKey, plaintext: message)
         
-        try await sendRaw(encrypted)
+        print("📤 发送 CONNECT: \(target)")
+        try await sendWebSocketBinary(encrypted)
         
-        // 接收响应
         let response = try await recv()
         let responseStr = String(data: response, encoding: .utf8) ?? ""
+        print("📥 收到响应: \(responseStr)")
         
         guard responseStr.starts(with: "OK") else {
             throw WebSocketError.connectionFailed(responseStr)
@@ -205,7 +219,7 @@ actor SecureWebSocket {
         }
         
         let encrypted = try encrypt(key: sendKey, plaintext: data)
-        try await sendRaw(encrypted)
+        try await sendWebSocketBinary(encrypted)
     }
     
     func recv() async throws -> Data {
@@ -217,24 +231,97 @@ actor SecureWebSocket {
         return try decrypt(key: recvKey, ciphertext: encrypted)
     }
     
-    // MARK: - Raw WebSocket Operations
+    // MARK: - WebSocket Frame Operations
     
-    private func sendRaw(_ data: Data) async throws {
+    private func sendWebSocketBinary(_ data: Data) async throws {
+        // WebSocket 二进制帧格式
+        var frame = Data()
+        
+        // Byte 0: FIN(1) + RSV(3) + Opcode(4) = 10000010 = 0x82
+        frame.append(0x82)
+        
+        // Byte 1: MASK(1) + Payload length(7)
+        let length = data.count
+        if length < 126 {
+            frame.append(UInt8(0x80 | length)) // 客户端必须设置 MASK 位
+        } else if length < 65536 {
+            frame.append(0xFE) // 126 + MASK
+            frame.append(UInt8((length >> 8) & 0xFF))
+            frame.append(UInt8(length & 0xFF))
+        } else {
+            frame.append(0xFF) // 127 + MASK
+            for i in stride(from: 56, through: 0, by: -8) {
+                frame.append(UInt8((length >> i) & 0xFF))
+            }
+        }
+        
+        // Masking key (4 bytes)
+        let maskKey = Data((0..<4).map { _ in UInt8.random(in: 0...255) })
+        frame.append(maskKey)
+        
+        // Masked payload
+        var maskedData = Data()
+        for (i, byte) in data.enumerated() {
+            maskedData.append(byte ^ maskKey[i % 4])
+        }
+        frame.append(maskedData)
+        
+        try await sendRawTCP(frame)
+    }
+    
+    private func recvWebSocketBinary() async throws -> Data {
+        // 读取帧头（至少 2 字节）
+        let header = try await recvRawTCP(exactLength: 2)
+        
+        let opcode = header[0] & 0x0F
+        guard opcode == 0x02 else { // Binary frame
+            throw WebSocketError.invalidFrame
+        }
+        
+        let masked = (header[1] & 0x80) != 0
+        var payloadLength = Int(header[1] & 0x7F)
+        
+        // 读取扩展长度
+        if payloadLength == 126 {
+            let extLen = try await recvRawTCP(exactLength: 2)
+            payloadLength = Int(extLen[0]) << 8 | Int(extLen[1])
+        } else if payloadLength == 127 {
+            let extLen = try await recvRawTCP(exactLength: 8)
+            payloadLength = 0
+            for byte in extLen {
+                payloadLength = (payloadLength << 8) | Int(byte)
+            }
+        }
+        
+        // 读取 masking key（如果有）
+        var maskKey: Data?
+        if masked {
+            maskKey = try await recvRawTCP(exactLength: 4)
+        }
+        
+        // 读取 payload
+        var payload = try await recvRawTCP(exactLength: payloadLength)
+        
+        // 解码（如果需要）
+        if let mask = maskKey {
+            for i in 0..<payload.count {
+                payload[i] ^= mask[i % 4]
+            }
+        }
+        
+        return payload
+    }
+    
+    // MARK: - Raw TCP Operations
+    
+    private func sendRawTCP(_ data: Data) async throws {
         guard let connection = connection else {
             throw WebSocketError.notConnected
         }
         
-        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
-        let context = NWConnection.ContentContext(
-            identifier: "WebSocket",
-            metadata: [metadata]
-        )
-        
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(
                 content: data,
-                contentContext: context,
-                isComplete: true,
                 completion: .contentProcessed { error in
                     if let error = error {
                         continuation.resume(throwing: error)
@@ -246,24 +333,38 @@ actor SecureWebSocket {
         }
     }
     
-    private func recvRaw() async throws -> Data {
+    private func recvRawTCP(exactLength: Int) async throws -> Data {
         guard let connection = connection else {
             throw WebSocketError.notConnected
         }
         
         return try await withCheckedThrowingContinuation { continuation in
-            connection.receiveMessage { content, context, isComplete, error in
+            connection.receive(minimumIncompleteLength: exactLength, maximumLength: exactLength) { data, _, _, error in
                 if let error = error {
                     continuation.resume(throwing: error)
-                    return
+                } else if let data = data, data.count == exactLength {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(throwing: WebSocketError.invalidFrame)
                 }
-                
-                guard let data = content else {
+            }
+        }
+    }
+    
+    private func recvRawTCP(maxLength: Int) async throws -> Data {
+        guard let connection = connection else {
+            throw WebSocketError.notConnected
+        }
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, _, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else if let data = data {
+                    continuation.resume(returning: data)
+                } else {
                     continuation.resume(throwing: WebSocketError.noData)
-                    return
                 }
-                
-                continuation.resume(returning: data)
             }
         }
     }
@@ -282,7 +383,7 @@ actor SecureWebSocket {
         Task {
             while isConnected {
                 do {
-                    let data = try await recvRaw()
+                    let data = try await recvWebSocketBinary()
                     
                     if let continuation = messageContinuation {
                         continuation.resume(returning: data)
@@ -316,32 +417,25 @@ actor SecureWebSocket {
     
     private func deriveKeys(sharedKey: Data, salt: Data) -> (sendKey: Data, recvKey: Data) {
         let info = "secure-proxy-v1".data(using: .utf8)!
-        
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: sharedKey),
             salt: salt,
             info: info,
             outputByteCount: 64
         )
-        
         let keyData = derivedKey.withUnsafeBytes { Data($0) }
-        let sendKey = keyData.prefix(32)
-        let recvKey = keyData.suffix(32)
-        
-        return (Data(sendKey), Data(recvKey))
+        return (Data(keyData.prefix(32)), Data(keyData.suffix(32)))
     }
     
     private func encrypt(key: Data, plaintext: Data) throws -> Data {
         let symmetricKey = SymmetricKey(data: key)
         let nonce = AES.GCM.Nonce()
-        
         let sealedBox = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce)
         
         var result = Data()
         result.append(sealedBox.nonce.withUnsafeBytes { Data($0) })
         result.append(sealedBox.ciphertext)
         result.append(sealedBox.tag)
-        
         return result
     }
     
@@ -351,54 +445,96 @@ actor SecureWebSocket {
         }
         
         let symmetricKey = SymmetricKey(data: key)
-        
-        let nonceData = ciphertext.prefix(12)
-        let tag = ciphertext.suffix(16)
-        let ciphertextData = ciphertext.dropFirst(12).dropLast(16)
-        
-        let nonce = try AES.GCM.Nonce(data: nonceData)
+        let nonce = try AES.GCM.Nonce(data: ciphertext.prefix(12))
         let sealedBox = try AES.GCM.SealedBox(
             nonce: nonce,
-            ciphertext: ciphertextData,
-            tag: tag
+            ciphertext: ciphertext.dropFirst(12).dropLast(16),
+            tag: ciphertext.suffix(16)
         )
         
         return try AES.GCM.open(sealedBox, using: symmetricKey)
     }
     
     private func hmacSHA256(key: Data, message: Data) -> Data {
-        let symmetricKey = SymmetricKey(data: key)
-        let hmac = HMAC<SHA256>.authenticationCode(for: message, using: symmetricKey)
+        let hmac = HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key))
         return Data(hmac)
     }
     
     private func timingSafeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        
         var result: UInt8 = 0
         for i in 0..<lhs.count {
             result |= lhs[i] ^ rhs[i]
         }
-        
         return result == 0
     }
     
     private func hexToData(_ hex: String) -> Data {
         var data = Data()
         var hex = hex
-        
         while !hex.isEmpty {
             let subIndex = hex.index(hex.startIndex, offsetBy: min(2, hex.count))
-            let substring = hex[..<subIndex]
-            
-            if let byte = UInt8(substring, radix: 16) {
+            if let byte = UInt8(String(hex[..<subIndex]), radix: 16) {
                 data.append(byte)
             }
-            
             hex = String(hex[subIndex...])
         }
-        
         return data
+    }
+}
+
+// MARK: - Connection State Handler
+
+private actor ConnectionStateHandler {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var hasCompleted = false
+    
+    init(continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+    }
+    
+    func handleState(_ state: NWConnection.State) {
+        guard !hasCompleted else { return }
+        
+        switch state {
+        case .ready:
+            hasCompleted = true
+            continuation?.resume()
+            continuation = nil
+            
+        case .failed(let error):
+            print("❌ TLS 连接失败: \(error)")
+            hasCompleted = true
+            continuation?.resume(throwing: error)
+            continuation = nil
+            
+        case .waiting(let error):
+            print("⚠️ TLS 等待中: \(error)")
+            let nsError = error as NSError
+            if nsError.domain == NSPOSIXErrorDomain && nsError.code == 53 {
+                hasCompleted = true
+                continuation?.resume(throwing: error)
+                continuation = nil
+            }
+            
+        case .preparing:
+            print("🔄 TLS 准备中...")
+        case .setup:
+            print("🔧 TLS 设置中...")
+        case .cancelled:
+            hasCompleted = true
+            continuation?.resume(throwing: WebSocketError.notConnected)
+            continuation = nil
+        @unknown default:
+            break
+        }
+    }
+    
+    func timeout() {
+        guard !hasCompleted else { return }
+        hasCompleted = true
+        continuation?.resume(throwing: WebSocketError.connectionTimeout)
+        continuation = nil
     }
 }
 
@@ -406,26 +542,28 @@ actor SecureWebSocket {
 
 enum WebSocketError: Error {
     case notConnected
+    case handshakeFailed
     case invalidServerKey
+    case invalidPSK
     case authenticationFailed
     case keysNotEstablished
     case connectionFailed(String)
+    case connectionTimeout
+    case invalidFrame
     case noData
     
     var localizedDescription: String {
         switch self {
-        case .notConnected:
-            return "WebSocket not connected"
-        case .invalidServerKey:
-            return "Invalid server public key"
-        case .authenticationFailed:
-            return "Authentication failed"
-        case .keysNotEstablished:
-            return "Encryption keys not established"
-        case .connectionFailed(let reason):
-            return "Connection failed: \(reason)"
-        case .noData:
-            return "No data received"
+        case .notConnected: return "WebSocket not connected"
+        case .handshakeFailed: return "WebSocket handshake failed"
+        case .invalidServerKey: return "Invalid server public key"
+        case .invalidPSK: return "Invalid pre-shared key"
+        case .authenticationFailed: return "Authentication failed"
+        case .keysNotEstablished: return "Encryption keys not established"
+        case .connectionFailed(let reason): return "Connection failed: \(reason)"
+        case .connectionTimeout: return "Connection timeout"
+        case .invalidFrame: return "Invalid WebSocket frame"
+        case .noData: return "No data received"
         }
     }
 }
