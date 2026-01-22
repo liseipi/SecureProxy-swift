@@ -1,14 +1,13 @@
-// SecureProxyApp.swift
-// 完全修复版本 - 使用 SwiftProxyManager
 import SwiftUI
+import AppKit
 
 @main
 struct SecureProxyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var manager = ProxyManager()  // 使用新的管理器
+    @StateObject private var manager = ProxyManager()
     
     var body: some Scene {
-        // 主窗口
+        // 主控制窗口
         Window("SecureProxy", id: "main") {
             ContentView()
                 .environmentObject(manager)
@@ -42,18 +41,21 @@ struct SecureProxyApp: App {
         .defaultPosition(.center)
         .defaultSize(width: 700, height: 450)
         
-        // 菜单栏图标
+        // 菜单栏图标：改为 .window 样式
         MenuBarExtra {
             MenuBarView(appDelegate: appDelegate)
                 .environmentObject(manager)
         } label: {
             MenuBarLabel(isRunning: manager.isRunning, status: manager.status)
         }
+        .menuBarExtraStyle(.window)
     }
 }
 
+// MARK: - AppDelegate 窗口调度逻辑
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 设置为 accessory，这样点击 Dock 不会弹出窗口，由菜单栏控制
         NSApp.setActivationPolicy(.accessory)
     }
     
@@ -79,21 +81,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 window.level = .normal
             }
         } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                if let window = NSApp.windows.first(where: {
-                    $0.contentViewController != nil &&
-                    !$0.styleMask.contains(.nonactivatingPanel) &&
-                    $0.title == "SecureProxy"
-                }) {
-                    window.level = .floating
-                    window.makeKeyAndOrderFront(nil)
-                    window.orderFrontRegardless()
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        window.level = .normal
-                    }
-                }
-            }
+            // 如果窗口已销毁则重新触发环境中的 openWindow (通过 Notification 或其他机制)
+            NotificationCenter.default.post(name: .openMainWindow, object: nil)
         }
     }
 }
@@ -102,46 +91,26 @@ extension Notification.Name {
     static let openMainWindow = Notification.Name("openMainWindow")
 }
 
+// MARK: - 菜单栏图标 Label
 struct MenuBarLabel: View {
     let isRunning: Bool
     let status: ProxyStatus
     
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: iconName)
-                .foregroundColor(iconColor)
-        }
-    }
-    
-    private var iconName: String {
-        if isRunning {
-            return "network"
-        } else {
-            return "network.slash"
-        }
+        Image(systemName: isRunning ? "network" : "network.slash")
+            .foregroundColor(iconColor)
     }
     
     private var iconColor: Color {
         switch status {
-        case .connected:
-            return .green
-        case .connecting:
-            return .orange
-        case .disconnected:
-            return .gray
+        case .connected: return .green
+        case .connecting: return .orange
+        case .disconnected: return .gray
         }
     }
 }
 
-struct HorizontalLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 6) {
-            configuration.icon
-            configuration.title
-        }
-    }
-}
-
+// MARK: - 重构后的 MenuBarView (Window 样式)
 struct MenuBarView: View {
     let appDelegate: AppDelegate
     @EnvironmentObject var manager: ProxyManager
@@ -149,117 +118,139 @@ struct MenuBarView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Image(systemName: manager.status.icon)
-                        .foregroundColor(manager.status.color)
-                    Text(manager.status.text)
-                        .font(.headline)
-                    Spacer()
+            // 1. 顶部状态栏
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(manager.status.color)
+                            .frame(width: 8, height: 8)
+                        Text(manager.status.text)
+                            .font(.system(.subheadline, weight: .semibold))
+                    }
+                    
+                    if let config = manager.activeConfig {
+                        Text(config.name)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 
-                if let config = manager.activeConfig {
-                    Text(config.name)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
+                Spacer()
                 
-                // Swift 版本标识
-                HStack {
-                    Image(systemName: "swift")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                    Text("Swift 原生实现")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+                // 运行开关
+                Toggle("", isOn: Binding(
+                    get: { manager.isRunning },
+                    set: { newValue in
+                        if newValue { manager.start() }
+                        else { manager.stop() }
+                    }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.large)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(Color.primary.opacity(0.03))
             
             Divider()
             
-            Button(action: {
-                if manager.isRunning {
-                    manager.stop()
-                } else {
-                    manager.start()
+            // 2. 流量详情面板 (仅在运行时显示)
+            if manager.isRunning {
+                VStack(spacing: 10) {
+                    HStack(spacing: 0) {
+                        TrafficStatsView(title: "上行速度", value: manager.trafficUp, icon: "arrow.up.circle.fill", color: .blue)
+                        Divider().frame(height: 30)
+                        TrafficStatsView(title: "下行速度", value: manager.trafficDown, icon: "arrow.down.circle.fill", color: .green)
+                    }
+                    
+                    if let config = manager.activeConfig {
+                        HStack {
+                            Text("SOCKS5: \(config.socksPort)")
+                            Text("|")
+                            Text("HTTP: \(config.httpPort)")
+                        }
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    }
                 }
-            }) {
-                Label(manager.isRunning ? "停止代理" : "启动代理",
-                      systemImage: manager.isRunning ? "stop.circle.fill" : "play.circle.fill")
-                    .labelStyle(HorizontalLabelStyle())
-                    .foregroundColor(manager.isRunning ? .red : .green)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            
-            if manager.isRunning, let config = manager.activeConfig {
+                .padding(.vertical, 12)
+                
                 Divider()
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(String(format: "%.1f KB/s", manager.trafficUp),
-                          systemImage: "arrow.up.circle.fill")
-                        .labelStyle(HorizontalLabelStyle())
-                        .foregroundColor(.blue)
-                    
-                    Label(String(format: "%.1f KB/s", manager.trafficDown),
-                          systemImage: "arrow.down.circle.fill")
-                        .labelStyle(HorizontalLabelStyle())
-                        .foregroundColor(.green)
-                    
-                    Text("SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.top, 2)
+            }
+            
+            // 3. 操作按钮区
+            VStack(spacing: 4) {
+                MenuRowButton(title: "控制中心", icon: "macwindow") {
+                    appDelegate.showMainWindow()
+                    openWindow(id: "main")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                
+                MenuRowButton(title: "运行日志", icon: "doc.text") {
+                    openWindow(id: "logs")
+                }
+                
+                Divider().padding(.vertical, 4)
+                
+                MenuRowButton(title: "退出程序", icon: "power", color: .red) {
+                    NSApplication.shared.terminate(nil)
+                }
             }
-            
-            Divider()
-            
-            Button(action: {
-                appDelegate.showMainWindow()
-                openWindow(id: "main")
-            }) {
-                Label("打开主窗口", systemImage: "macwindow")
-                    .labelStyle(HorizontalLabelStyle())
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            
-            Button(action: {
-                openWindow(id: "logs")
-            }) {
-                Label("查看日志", systemImage: "doc.text")
-                    .labelStyle(HorizontalLabelStyle())
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            
-            Divider()
-            
-            Button(action: {
-                NSApplication.shared.terminate(nil)
-            }) {
-                Label("退出", systemImage: "power")
-                    .labelStyle(HorizontalLabelStyle())
-                    .foregroundColor(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(8)
         }
-        .frame(width: 260)
+        .frame(width: 200) // 固定窗口宽度
+    }
+}
+
+// MARK: - 辅助子视图
+struct TrafficStatsView: View {
+    let title: String
+    let value: Double
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        VStack(spacing: 4) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Text(String(format: "%.1f KB/s", value))
+                .font(.system(size: 12))
+                .font(.system(.body, design: .monospaced))
+                .fontWeight(.light)
+                .foregroundColor(color)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+struct MenuRowButton: View {
+    let title: String
+    let icon: String
+    var color: Color = .primary
+    let action: () -> Void
+    
+    @State private var isHovered = false
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14))
+                    .frame(width: 20)
+                Text(title)
+                    .font(.system(size: 13))
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(color)
+        .onHover { isHovered = $0 }
     }
 }
