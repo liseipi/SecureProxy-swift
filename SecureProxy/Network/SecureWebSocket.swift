@@ -21,9 +21,9 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
-        let wsUrl = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
-        print("🔗 连接到: \(wsUrl)")
-        print("📡 SNI Host: \(config.sniHost)")
+        // let wsUrl = "wss://\(config.sniHost):\(config.serverPort)\(config.path)"
+        // print("🔗 连接到: \(wsUrl)")
+        // print("📡 SNI Host: \(config.sniHost)")
         
         // 🔧 使用纯 TLS 连接，不使用 NWProtocolWebSocket
         let tlsOptions = NWProtocolTLS.Options()
@@ -73,7 +73,7 @@ actor SecureWebSocket {
         }
         
         // TLS 连接成功后，执行 WebSocket 握手
-        print("✅ TLS 连接就绪")
+        // print("✅ TLS 连接就绪")
         try await performWebSocketHandshake()
         
         // WebSocket 握手成功后，执行密钥交换
@@ -85,7 +85,7 @@ actor SecureWebSocket {
     // MARK: - WebSocket Handshake
     
     private func performWebSocketHandshake() async throws {
-        print("🤝 开始 WebSocket 握手...")
+        // print("🤝 开始 WebSocket 握手...")
         
         // 生成 WebSocket Key
         let wsKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
@@ -102,11 +102,11 @@ actor SecureWebSocket {
         
         // 发送握手请求
         try await sendRawTCP(request.data(using: .utf8)!)
-        print("📤 已发送 WebSocket 握手请求")
+        // print("📤 已发送 WebSocket 握手请求")
         
         // 读取握手响应
         let response = try await readHTTPResponse()
-        print("📥 收到握手响应: \(response.prefix(100))...")
+        // print("📥 收到握手响应: \(response.prefix(100))...")
         
         // 验证握手响应
         guard response.contains("HTTP/1.1 101") || response.contains("HTTP/1.0 101") else {
@@ -145,16 +145,16 @@ actor SecureWebSocket {
             throw WebSocketError.notConnected
         }
         
-        print("🔑 开始密钥交换...")
+        // print("🔑 开始密钥交换...")
         
         // 1. 生成并发送客户端公钥
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
         try await sendWebSocketBinary(clientPub)
-        print("📤 已发送客户端公钥 (\(clientPub.count) bytes)")
+        // print("📤 已发送客户端公钥 (\(clientPub.count) bytes)")
         
         // 2. 接收服务器公钥
         let serverPub = try await recvWebSocketBinary()
-        print("📥 已接收服务器公钥 (\(serverPub.count) bytes)")
+        // print("📥 已接收服务器公钥 (\(serverPub.count) bytes)")
         
         guard serverPub.count == 32 else {
             throw WebSocketError.invalidServerKey
@@ -171,13 +171,13 @@ actor SecureWebSocket {
         let keys = deriveKeys(sharedKey: psk, salt: salt)
         sendKey = keys.sendKey
         recvKey = keys.recvKey
-        print("🔐 密钥派生完成")
+        // print("🔐 密钥派生完成")
         
         // 4. 发送认证
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
         try await sendWebSocketBinary(challenge)
-        print("📤 已发送认证请求")
+        // print("📤 已发送认证请求")
         
         // 5. 验证响应
         let authResponse = try await recvWebSocketBinary()
@@ -201,12 +201,12 @@ actor SecureWebSocket {
         let message = "CONNECT \(target)".data(using: .utf8)!
         let encrypted = try encrypt(key: sendKey, plaintext: message)
         
-        print("📤 发送 CONNECT: \(target)")
+        // print("📤 发送 CONNECT: \(target)")
         try await sendWebSocketBinary(encrypted)
         
         let response = try await recv()
         let responseStr = String(data: response, encoding: .utf8) ?? ""
-        print("📥 收到响应: \(responseStr)")
+        // print("📥 收到响应: \(responseStr)")
         
         guard responseStr.starts(with: "OK") else {
             throw WebSocketError.connectionFailed(responseStr)
@@ -509,7 +509,7 @@ private actor ConnectionStateHandler {
             continuation = nil
             
         case .waiting(let error):
-            print("⚠️ TLS 等待中: \(error)")
+            // print("⚠️ TLS 等待中: \(error)")
             let nsError = error as NSError
             if nsError.domain == NSPOSIXErrorDomain && nsError.code == 53 {
                 hasCompleted = true
@@ -518,9 +518,11 @@ private actor ConnectionStateHandler {
             }
             
         case .preparing:
-            print("🔄 TLS 准备中...")
+            // print("🔄 TLS 准备中...")
+            break
         case .setup:
-            print("🔧 TLS 设置中...")
+            // print("🔧 TLS 设置中...")
+            break
         case .cancelled:
             hasCompleted = true
             continuation?.resume(throwing: WebSocketError.notConnected)
