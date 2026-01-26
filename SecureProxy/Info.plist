@@ -28,7 +28,7 @@
     
     <!-- 应用类别 -->
     <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
+    <string>public.app-category.networking</string>
     
     <!-- 支持后台模式 -->
     <key>LSUIElement</key>
