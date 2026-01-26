@@ -1,5 +1,5 @@
-// SecureWebSocket.swift - v3.2 协议兼容版本
-// 支持 Cloudflare CDN 优选 IP + 协议版本头部 + 修复并发问题
+// SecureWebSocket.swift - 支持 Cloudflare CDN 优选 IP
+// 最小修改版本：只修复并发问题，保持原有连接方式
 import Foundation
 import Network
 import CryptoKit
@@ -13,18 +13,6 @@ actor SecureWebSocket {
     private var messageQueue: [Data] = []
     private var messageContinuation: CheckedContinuation<Data, Error>?
     private var wsHandshakeComplete = false
-    private var lastActivity = Date()
-    
-    // 🔧 修复: 使用 Task 代替 Timer，避免 actor 隔离问题
-    private var keepaliveTask: Task<Void, Never>?
-    
-    // 协议版本
-    private let protocolVersion = "1"
-    
-    // 超时配置
-    private let connectTimeout: TimeInterval = 10.0
-    private let messageTimeout: TimeInterval = 30.0
-    private let keepaliveInterval: TimeInterval = 20.0
     
     init(config: ProxyConfig) {
         self.config = config
@@ -33,7 +21,7 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
-        // 判断连接方式
+        // 🔧 判断连接方式
         let useCDN = config.sniHost != config.proxyIP
         
         let actualHost: String
@@ -45,7 +33,7 @@ actor SecureWebSocket {
             print("🔗 直连域名: \(config.sniHost)")
         }
         
-        // 使用纯 TLS 连接，不使用 NWProtocolWebSocket
+        // 🔧 使用纯 TLS 连接，不使用 NWProtocolWebSocket
         let tlsOptions = NWProtocolTLS.Options()
         
         // 允许自签名证书
@@ -63,7 +51,7 @@ actor SecureWebSocket {
             config.sniHost
         )
         
-        // 只使用 TLS，不添加 WebSocket 协议层
+        // 🔧 关键：只使用 TLS，不添加 WebSocket 协议层
         let parameters = NWParameters(tls: tlsOptions)
         parameters.allowLocalEndpointReuse = true
         
@@ -87,7 +75,7 @@ actor SecureWebSocket {
             
             // 超时处理
             Task {
-                try? await Task.sleep(nanoseconds: UInt64(connectTimeout * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
                 await stateHandler.timeout()
             }
         }
@@ -100,7 +88,6 @@ actor SecureWebSocket {
         try await setupKeys()
         isConnected = true
         startReceiving()
-        setupKeepalive()
     }
     
     // MARK: - WebSocket Handshake
@@ -112,15 +99,13 @@ actor SecureWebSocket {
         let wsKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
         
         // 构建 WebSocket 握手请求 (Host 始终使用 sni_host)
-        // 🔧 新增: X-Protocol-Version 头部
         var request = "GET \(config.path) HTTP/1.1\r\n"
         request += "Host: \(config.sniHost)\r\n"
         request += "Upgrade: websocket\r\n"
         request += "Connection: Upgrade\r\n"
         request += "Sec-WebSocket-Key: \(wsKey)\r\n"
         request += "Sec-WebSocket-Version: 13\r\n"
-        request += "User-Agent: SecureProxy-Swift/3.2\r\n"
-        request += "X-Protocol-Version: \(protocolVersion)\r\n"  // 🔧 协议版本
+        request += "User-Agent: SecureProxy-Swift/2.0\r\n"
         request += "\r\n"
         
         // 发送握手请求
@@ -208,49 +193,6 @@ actor SecureWebSocket {
         print("✅ 认证成功")
     }
     
-    // MARK: - Keepalive
-    
-    // 🔧 修复: 使用 Task 代替 Timer
-    private func setupKeepalive() {
-        keepaliveTask?.cancel()
-        
-        keepaliveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                // 等待 20 秒
-                try? await Task.sleep(nanoseconds: UInt64(20 * 1_000_000_000))
-                
-                guard !Task.isCancelled else { break }
-                
-                // 发送 Ping
-                await self?.sendPing()
-            }
-        }
-    }
-    
-    private func sendPing() async {
-        guard isConnected else { return }
-        
-        // WebSocket Ping 帧格式
-        var frame = Data()
-        frame.append(0x89) // FIN(1) + Opcode(9) = Ping
-        frame.append(0x80) // MASK(1) + Payload length(0)
-        
-        // Masking key (4 bytes) - Ping 没有 payload，但客户端必须设置 MASK 位
-        let maskKey = Data((0..<4).map { _ in UInt8.random(in: 0...255) })
-        frame.append(maskKey)
-        
-        do {
-            try await sendRawTCP(frame)
-            updateActivity()
-        } catch {
-            print("⚠️ Ping 发送失败: \(error)")
-        }
-    }
-    
-    private func updateActivity() {
-        lastActivity = Date()
-    }
-    
     // MARK: - Send/Receive
     
     func sendConnect(host: String, port: Int) async throws {
@@ -279,7 +221,6 @@ actor SecureWebSocket {
         
         let encrypted = try encrypt(key: sendKey, plaintext: data)
         try await sendWebSocketBinary(encrypted)
-        updateActivity()
     }
     
     func recv() async throws -> Data {
@@ -288,7 +229,6 @@ actor SecureWebSocket {
         }
         
         let encrypted = try await recvMessage()
-        updateActivity()
         return try decrypt(key: recvKey, ciphertext: encrypted)
     }
     
@@ -335,15 +275,6 @@ actor SecureWebSocket {
         let header = try await recvRawTCP(exactLength: 2)
         
         let opcode = header[0] & 0x0F
-        
-        // 🔧 处理 Pong 帧
-        if opcode == 0x0A {
-            print("🏓 收到 Pong")
-            updateActivity()
-            // 递归读取下一个帧
-            return try await recvWebSocketBinary()
-        }
-        
         guard opcode == 0x02 else { // Binary frame
             throw WebSocketError.invalidFrame
         }
@@ -476,11 +407,6 @@ actor SecureWebSocket {
     
     func close() {
         isConnected = false
-        
-        // 🔧 修复: 取消 Task 而不是 invalidate Timer
-        keepaliveTask?.cancel()
-        keepaliveTask = nil
-        
         connection?.cancel()
         connection = nil
         sendKey = nil
