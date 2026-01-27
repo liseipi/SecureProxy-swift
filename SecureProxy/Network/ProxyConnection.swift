@@ -1,5 +1,5 @@
 // ProxyConnection.swift
-// 修复 actor 隔离问题
+// 修复版本 - 增强错误处理和日志
 
 import Foundation
 import Network
@@ -95,17 +95,38 @@ actor OptimizedProxyConnection {
     // MARK: - Remote Connection (使用连接池)
     
     func connectToRemote(host: String, port: Int) async throws {
+        onLog("🔗 开始连接远程服务器: \(host):\(port)")
+        
         // 从连接池获取连接
-        let ws = try await connectionManager.acquire()
+        let ws: SecureWebSocket
+        do {
+            ws = try await connectionManager.acquire()
+            onLog("✅ 从连接池获取连接成功: \(ws.id)")
+        } catch {
+            onLog("❌ 从连接池获取连接失败: \(error.localizedDescription)")
+            throw error
+        }
         
         do {
             try await ws.sendConnect(host: host, port: port)
             remoteWebSocket = ws
-            onLog("✅ 远程连接建立: \(host):\(port)")
+            onLog("✅ 远程连接建立成功: \(host):\(port)")
         } catch {
-            // 连接失败，释放回池 - 使用 await
-            await connectionManager.release(ws)
+            // 🔧 关键修复：sendConnect 失败时，连接已不可用
             onLog("❌ 远程连接失败: \(error.localizedDescription)")
+            
+            // 详细的错误信息
+            if let wsError = error as? WebSocketError {
+                onLog("🔍 WebSocket 错误详情: \(wsError.errorDescription ?? "未知错误")")
+            } else if let nsError = error as NSError? {
+                onLog("🔍 系统错误详情: 域=\(nsError.domain), 代码=\(nsError.code), 描述=\(nsError.localizedDescription)")
+            }
+            
+            // 🔧 立即关闭并释放连接（让连接池知道这个连接已损坏）
+            onLog("🔴 关闭失败的连接: \(ws.id)")
+            await ws.close()  // 先关闭
+            await connectionManager.release(ws)  // 再释放（release 会检测到不健康并移除）
+            
             throw error
         }
     }
@@ -114,10 +135,12 @@ actor OptimizedProxyConnection {
     
     func startForwarding() async {
         guard let ws = remoteWebSocket else {
+            onLog("⚠️ 没有远程连接，无法开始转发")
             return
         }
         
         isForwarding = true
+        onLog("🔄 开始双向数据转发")
         
         // 创建双向转发任务
         async let clientToRemote: Void = forwardClientToRemote(ws: ws)
@@ -144,6 +167,7 @@ actor OptimizedProxyConnection {
                 try await ws.send(data)
                 bytesSent += Int64(data.count)
             } catch {
+                // onLog("⚠️ 客户端->远程转发中断: \(error.localizedDescription)")
                 break
             }
         }
@@ -158,6 +182,7 @@ actor OptimizedProxyConnection {
                 try await writeToClient(data)
                 bytesReceived += Int64(data.count)
             } catch {
+                // onLog("⚠️ 远程->客户端转发中断: \(error.localizedDescription)")
                 break
             }
         }
@@ -190,7 +215,6 @@ actor OptimizedProxyConnection {
         clientConnection.cancel()
         
         if let ws = remoteWebSocket {
-            // 释放回连接池而不是关闭 - 使用 await
             await connectionManager.release(ws)
             remoteWebSocket = nil
         }
@@ -199,19 +223,19 @@ actor OptimizedProxyConnection {
 
 // MARK: - Errors
 
-enum ProxyError: Error {
+enum ProxyError: LocalizedError {
     case insufficientData
     case lineTooLong
     case noData
     
-    var localizedDescription: String {
+    var errorDescription: String? {
         switch self {
         case .insufficientData:
-            return "Insufficient data received"
+            return "接收到的数据不足"
         case .lineTooLong:
-            return "Line too long"
+            return "请求行过长（超过 8KB）"
         case .noData:
-            return "No data available"
+            return "没有可用数据"
         }
     }
 }

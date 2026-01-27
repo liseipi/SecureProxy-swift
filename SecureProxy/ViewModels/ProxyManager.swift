@@ -1,5 +1,5 @@
 // ProxyManager.swift
-// 修复版本 - 解决重连问题
+// 修复版本 - 增加自动重连和更好的错误处理
 
 import Foundation
 import Combine
@@ -25,9 +25,15 @@ class ProxyManager: ObservableObject {
     private var statsTimer: Timer?
     private var notificationsEnabled = false
     
-    // 🔧 新增：防止重复启动的标志
+    // 防止重复启动的标志
     private var isStarting = false
     private var isStopping = false
+    
+    // 🔧 新增：自动重连
+    private var autoReconnect = true
+    private var reconnectAttempts = 0
+    private var maxReconnectAttempts = 5
+    private var reconnectTimer: Timer?
     
     init() {
         let fm = FileManager.default
@@ -43,7 +49,7 @@ class ProxyManager: ObservableObject {
         startTrafficMonitor()
         
         addLog("✅ ProxyManager 初始化完成")
-        addLog("🚀 使用连接池优化技术")
+        addLog("🚀 使用优化连接池 v3.3")
     }
     
     private func requestNotificationPermission() {
@@ -129,10 +135,9 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - Proxy Control (修复版本)
+    // MARK: - Proxy Control
     
     func start() {
-        // 🔧 修复：防止重复启动
         guard !isStarting else {
             addLog("⚠️ 代理正在启动中，请稍候...")
             return
@@ -147,6 +152,9 @@ class ProxyManager: ObservableObject {
             addLog("❌ 错误: 没有选中的配置")
             return
         }
+        
+        // 🔧 重置重连计数
+        reconnectAttempts = 0
         
         isStarting = true
         status = .connecting
@@ -166,31 +174,20 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
-            // 🔧 修复：确保旧的连接管理器已完全清理
+            // 确保旧的连接管理器已完全清理
             if let oldManager = connectionManager {
                 addLog("🧹 清理旧的连接管理器...")
                 await oldManager.cleanup()
                 connectionManager = nil
-                
-                // 等待一段时间确保资源释放
-                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
             
             // 创建新的连接管理器
             let manager = OptimizedConnectionManager(
                 config: config,
-                minPoolSize: 0,  // 暂时设为 0 跳过预热
+                minPoolSize: 0,  // 按需创建模式
                 maxPoolSize: 20
             )
-            
-            // 如果 minPoolSize > 0 才预热
-            if manager.minPoolSize > 0 {
-                addLog("🔥 预热连接池...")
-                try await manager.warmup()
-                addLog("✅ 连接池就绪")
-            } else {
-                addLog("ℹ️ 跳过连接池预热(按需创建模式)")
-            }
             
             connectionManager = manager
             
@@ -229,6 +226,9 @@ class ProxyManager: ObservableObject {
             self.status = .connected
             self.isStarting = false
             
+            // 🔧 重置重连计数
+            self.reconnectAttempts = 0
+            
             self.addLog("✅ 代理服务启动成功")
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
@@ -253,11 +253,23 @@ class ProxyManager: ObservableObject {
                 await manager.cleanup()
                 connectionManager = nil
             }
+            
+            // 🔧 尝试自动重连
+            if autoReconnect && reconnectAttempts < maxReconnectAttempts {
+                reconnectAttempts += 1
+                let delay = min(reconnectAttempts * 2, 10)  // 最多等待 10 秒
+                self.addLog("🔄 \(delay) 秒后自动重连 (尝试 \(reconnectAttempts)/\(maxReconnectAttempts))...")
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay)) {
+                    self.start()
+                }
+            } else if reconnectAttempts >= maxReconnectAttempts {
+                self.addLog("❌ 已达到最大重连次数，请手动重试")
+            }
         }
     }
     
     func stop() {
-        // 🔧 修复：防止重复停止
         guard !isStopping else {
             addLog("⚠️ 代理正在停止中...")
             return
@@ -267,6 +279,11 @@ class ProxyManager: ObservableObject {
             addLog("ℹ️ 代理未运行")
             return
         }
+        
+        // 🔧 停止自动重连
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+        reconnectAttempts = 0
         
         isStopping = true
         addLog("🛑 准备停止代理...")
@@ -309,6 +326,29 @@ class ProxyManager: ObservableObject {
         self.addLog("✅ 代理已完全停止")
     }
     
+    // 🔧 新增：手动重建连接池
+    func rebuildConnectionPool() {
+        guard let manager = connectionManager, isRunning else {
+            addLog("⚠️ 代理未运行，无法重建连接池")
+            return
+        }
+        
+        addLog("🔄 开始重建连接池...")
+        
+        Task {
+            do {
+                try await manager.rebuild()
+                await MainActor.run {
+                    self.addLog("✅ 连接池重建成功")
+                }
+            } catch {
+                await MainActor.run {
+                    self.addLog("❌ 连接池重建失败: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
     func forceCleanup() {
         addLog("🧹 开始强制清理...")
         stop()
@@ -332,14 +372,14 @@ class ProxyManager: ObservableObject {
     
     private func startStatsMonitor() {
         statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
             Task {
                 if let manager = await self.connectionManager {
                     let stats = await manager.getStats()
                     await MainActor.run {
-                        self.addLog("📊 连接池: 总数=\(stats.poolSize), 忙碌=\(stats.busy), 创建=\(stats.created), 复用=\(stats.reused)")
+                        self.addLog("📊 连接池: 总数=\(stats.poolSize), 忙碌=\(stats.busy), 创建=\(stats.created), 复用=\(stats.reused), 失败=\(stats.failed)")
                     }
                 }
             }
@@ -564,10 +604,12 @@ class ProxyManager: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
     
-    // MARK: - Deinit
+    // MARK: - Cleanup
     
     deinit {
-        // 清理 actor 资源
+        // 🔧 注意：deinit 是 nonisolated 的，不能直接访问 Timer
+        // Timer 会在对象销毁时自动失效
+        
         let socks = socksServer
         let http = httpServer
         let manager = connectionManager
