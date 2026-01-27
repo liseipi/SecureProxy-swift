@@ -1,19 +1,27 @@
 // HTTPProxyServer.swift
+// 使用连接池优化版本
+
 import Foundation
 import Network
 
 actor HTTPProxyServer {
     private let port: Int
     private let config: ProxyConfig
+    private let connectionManager: OptimizedConnectionManager
     private var listener: NWListener?
-    private var connections: [UUID: ProxyConnection] = [:]
+    private var connections: [UUID: OptimizedProxyConnection] = [:]
     
-    // 使用 nonisolated 的日志闭包，避免数据竞争
     nonisolated let onLog: @Sendable (String) -> Void
     
-    init(port: Int, config: ProxyConfig, onLog: @escaping @Sendable (String) -> Void) {
+    init(
+        port: Int,
+        config: ProxyConfig,
+        connectionManager: OptimizedConnectionManager,
+        onLog: @escaping @Sendable (String) -> Void
+    ) {
         self.port = port
         self.config = config
+        self.connectionManager = connectionManager
         self.onLog = onLog
     }
     
@@ -66,10 +74,11 @@ actor HTTPProxyServer {
     
     private func handleNewConnection(_ nwConnection: NWConnection) async {
         let id = UUID()
-        let connection = ProxyConnection(
+        let connection = OptimizedProxyConnection(
             id: id,
             clientConnection: nwConnection,
             config: config,
+            connectionManager: connectionManager,
             onLog: onLog
         )
         
@@ -78,14 +87,14 @@ actor HTTPProxyServer {
         do {
             try await handleHTTPConnect(connection: connection)
         } catch {
-            onLog("❌ HTTP 错误: \(error.localizedDescription)")
+            // 错误已在内部记录
         }
         
         await connection.close()
         connections.removeValue(forKey: id)
     }
     
-    private func handleHTTPConnect(connection: ProxyConnection) async throws {
+    private func handleHTTPConnect(connection: OptimizedProxyConnection) async throws {
         // 读取请求行
         let requestLine = try await connection.readLine()
         
@@ -115,8 +124,6 @@ actor HTTPProxyServer {
             port = 443
         }
         
-        onLog("🔗 HTTP CONNECT: \(host):\(port)")
-        
         // 跳过请求头
         while true {
             let line = try await connection.readLine()
@@ -125,7 +132,7 @@ actor HTTPProxyServer {
             }
         }
         
-        // 连接到远程服务器
+        // 连接到远程服务器 (使用连接池)
         try await connection.connectToRemote(host: host, port: port)
         
         // 发送成功响应

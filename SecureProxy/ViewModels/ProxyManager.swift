@@ -1,4 +1,6 @@
-// ProxyManager.swift - 添加 URL 格式导入/导出支持
+// ProxyManager.swift
+// 修复 deinit 中的 Sendable 问题
+
 import Foundation
 import Combine
 import AppKit
@@ -17,6 +19,7 @@ class ProxyManager: ObservableObject {
     
     private var socksServer: SOCKS5Server?
     private var httpServer: HTTPProxyServer?
+    private var connectionManager: OptimizedConnectionManager?
     private var configDirectory: URL
     private var timer: Timer?
     private var statsTimer: Timer?
@@ -36,7 +39,7 @@ class ProxyManager: ObservableObject {
         startTrafficMonitor()
         
         addLog("✅ ProxyManager 初始化完成")
-        addLog("🔧 使用纯 Swift 实现的代理客户端")
+        addLog("🚀 使用连接池优化技术")
     }
     
     private func requestNotificationPermission() {
@@ -50,7 +53,7 @@ class ProxyManager: ObservableObject {
                     print("✅ 通知权限已授予")
                     self?.notificationsEnabled = true
                 } else {
-                    print("ℹ️ 通知权限被拒绝（可在系统设置中启用）")
+                    print("ℹ️ 通知权限被拒绝")
                     self?.notificationsEnabled = false
                 }
             }
@@ -134,7 +137,7 @@ class ProxyManager: ObservableObject {
         addLog("🚀 启动代理...")
         addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
         addLog("🔐 使用 AES-256-GCM 加密")
-        addLog("🌐 WebSocket 路径: \(config.path)")
+        addLog("🔥 启用连接池优化")
         
         Task {
             await startProxyServers(config: config)
@@ -144,9 +147,27 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
+            let manager = OptimizedConnectionManager(
+                config: config,
+                minPoolSize: 0,  // 暂时设为 0 跳过预热,测试用
+                maxPoolSize: 20
+            )
+            
+            // 如果 minPoolSize > 0 才预热
+            if manager.minPoolSize > 0 {
+                addLog("🔥 预热连接池...")
+                try await manager.warmup()
+                addLog("✅ 连接池就绪")
+            } else {
+                addLog("⚠️ 跳过连接池预热(测试模式)")
+            }
+            
+            connectionManager = manager
+            
             let socks = SOCKS5Server(
                 port: config.socksPort,
                 config: config,
+                connectionManager: manager,
                 onLog: { [weak self] message in
                     Task { @MainActor in
                         self?.addLog(message)
@@ -160,6 +181,7 @@ class ProxyManager: ObservableObject {
             let http = HTTPProxyServer(
                 port: config.httpPort,
                 config: config,
+                connectionManager: manager,
                 onLog: { [weak self] message in
                     Task { @MainActor in
                         self?.addLog(message)
@@ -182,6 +204,8 @@ class ProxyManager: ObservableObject {
                     message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
                 )
             }
+            
+            startStatsMonitor()
             
         } catch {
             self.addLog("❌ 启动失败: \(error.localizedDescription)")
@@ -208,12 +232,22 @@ class ProxyManager: ObservableObject {
                 }
             }
             
+            if let manager = connectionManager {
+                await manager.cleanup()
+                await MainActor.run {
+                    connectionManager = nil
+                }
+            }
+            
             await MainActor.run {
                 self.isRunning = false
                 self.status = .disconnected
                 self.trafficUp = 0
                 self.trafficDown = 0
                 self.addLog("✅ 代理已停止")
+                
+                self.statsTimer?.invalidate()
+                self.statsTimer = nil
             }
         }
     }
@@ -239,6 +273,21 @@ class ProxyManager: ObservableObject {
         }
     }
     
+    private func startStatsMonitor() {
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            
+            Task {
+                if let manager = await self.connectionManager {
+                    let stats = await manager.getStats()
+                    await MainActor.run {
+                        self.addLog("📊 连接池: 总数=\(stats.poolSize), 忙碌=\(stats.busy), 创建=\(stats.created), 复用=\(stats.reused)")
+                    }
+                }
+            }
+        }
+    }
+    
     // MARK: - Logging
     
     private func addLog(_ message: String) {
@@ -254,9 +303,8 @@ class ProxyManager: ObservableObject {
         addLog("🗑️ 日志已清除")
     }
     
-    // MARK: - Import/Export (URL Format)
+    // MARK: - Import/Export
     
-    /// 复制配置链接到剪贴板
     func copyConfigURL(_ config: ProxyConfig) {
         let urlString = config.toURLString()
         let pasteboard = NSPasteboard.general
@@ -269,7 +317,6 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    /// 从剪贴板导入配置
     func importFromClipboard() {
         let pasteboard = NSPasteboard.general
         guard let urlString = pasteboard.string(forType: .string) else {
@@ -280,17 +327,14 @@ class ProxyManager: ObservableObject {
         importFromURLString(urlString)
     }
     
-    /// 从 URL 字符串导入配置
     func importFromURLString(_ urlString: String) {
         guard let config = ProxyConfig.from(urlString: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             addLog("❌ 无效的配置链接格式")
-            addLog("正确格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy")
             return
         }
         
         var newConfig = config
         
-        // 检查名称冲突
         if configs.contains(where: { $0.name == config.name }) {
             newConfig.name = "\(config.name) (导入)"
         }
@@ -304,12 +348,9 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    /// 显示配置链接
     func showConfigURL(_ config: ProxyConfig) -> String {
         return config.toURLString()
     }
-    
-    // MARK: - Import/Export (Legacy JSON Format)
     
     func exportConfig(_ config: ProxyConfig) {
         let savePanel = NSSavePanel()
@@ -330,7 +371,7 @@ class ProxyManager: ObservableObject {
                 DispatchQueue.main.async {
                     self.addLog("✅ 配置已导出: \(config.name)")
                     if self.notificationsEnabled {
-                        self.showNotification(title: "导出成功", message: "配置已保存到 \(url.lastPathComponent)")
+                        self.showNotification(title: "导出成功", message: "配置已保存")
                     }
                 }
             } catch {
@@ -462,23 +503,29 @@ class ProxyManager: ObservableObject {
             trigger: nil
         )
         
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("⚠️ 通知发送失败: \(error.localizedDescription)")
-            }
-        }
+        UNUserNotificationCenter.current().add(request)
     }
     
+    // MARK: - Deinit (简化版本 - 移除 Timer 清理)
+    
     deinit {
+        // Timer 会在 RunLoop 中自动清理,无需手动处理
+        // 只清理 actor 资源
         let socks = socksServer
         let http = httpServer
+        let manager = connectionManager
         
-        Task { @MainActor in
-            if let socks = socks {
-                await socks.stop()
-            }
-            if let http = http {
-                await http.stop()
+        if socks != nil || http != nil || manager != nil {
+            Task {
+                if let socks = socks {
+                    await socks.stop()
+                }
+                if let http = http {
+                    await http.stop()
+                }
+                if let manager = manager {
+                    await manager.cleanup()
+                }
             }
         }
     }

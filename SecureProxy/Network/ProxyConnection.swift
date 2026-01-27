@@ -1,13 +1,15 @@
 // ProxyConnection.swift
+// 修复 actor 隔离问题
+
 import Foundation
 import Network
 
-actor ProxyConnection {
+actor OptimizedProxyConnection {
     let id: UUID
     private let clientConnection: NWConnection
     private let config: ProxyConfig
+    private let connectionManager: OptimizedConnectionManager
     
-    // 使用 nonisolated 的日志闭包
     nonisolated let onLog: @Sendable (String) -> Void
     
     private var remoteWebSocket: SecureWebSocket?
@@ -19,11 +21,13 @@ actor ProxyConnection {
         id: UUID,
         clientConnection: NWConnection,
         config: ProxyConfig,
+        connectionManager: OptimizedConnectionManager,
         onLog: @escaping @Sendable (String) -> Void
     ) {
         self.id = id
         self.clientConnection = clientConnection
         self.config = config
+        self.connectionManager = connectionManager
         self.onLog = onLog
         
         clientConnection.start(queue: .global())
@@ -88,17 +92,19 @@ actor ProxyConnection {
         }
     }
     
-    // MARK: - Remote Connection
+    // MARK: - Remote Connection (使用连接池)
     
     func connectToRemote(host: String, port: Int) async throws {
-        let ws = SecureWebSocket(config: config)
+        // 从连接池获取连接
+        let ws = try await connectionManager.acquire()
         
         do {
-            try await ws.connect()
             try await ws.sendConnect(host: host, port: port)
             remoteWebSocket = ws
             onLog("✅ 远程连接建立: \(host):\(port)")
         } catch {
+            // 连接失败，释放回池 - 使用 await
+            await connectionManager.release(ws)
             onLog("❌ 远程连接失败: \(error.localizedDescription)")
             throw error
         }
@@ -184,7 +190,8 @@ actor ProxyConnection {
         clientConnection.cancel()
         
         if let ws = remoteWebSocket {
-            await ws.close()
+            // 释放回连接池而不是关闭 - 使用 await
+            await connectionManager.release(ws)
             remoteWebSocket = nil
         }
     }

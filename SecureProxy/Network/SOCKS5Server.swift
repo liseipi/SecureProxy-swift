@@ -1,19 +1,27 @@
 // SOCKS5Server.swift
+// 使用连接池优化版本
+
 import Foundation
 import Network
 
 actor SOCKS5Server {
     private let port: Int
     private let config: ProxyConfig
+    private let connectionManager: OptimizedConnectionManager
     private var listener: NWListener?
-    private var connections: [UUID: ProxyConnection] = [:]
+    private var connections: [UUID: OptimizedProxyConnection] = [:]
     
-    // 使用 nonisolated 的日志闭包，避免数据竞争
     nonisolated let onLog: @Sendable (String) -> Void
     
-    init(port: Int, config: ProxyConfig, onLog: @escaping @Sendable (String) -> Void) {
+    init(
+        port: Int,
+        config: ProxyConfig,
+        connectionManager: OptimizedConnectionManager,
+        onLog: @escaping @Sendable (String) -> Void
+    ) {
         self.port = port
         self.config = config
+        self.connectionManager = connectionManager
         self.onLog = onLog
     }
     
@@ -66,10 +74,11 @@ actor SOCKS5Server {
     
     private func handleNewConnection(_ nwConnection: NWConnection) async {
         let id = UUID()
-        let connection = ProxyConnection(
+        let connection = OptimizedProxyConnection(
             id: id,
             clientConnection: nwConnection,
             config: config,
+            connectionManager: connectionManager,
             onLog: onLog
         )
         
@@ -78,14 +87,14 @@ actor SOCKS5Server {
         do {
             try await handleSOCKS5(connection: connection)
         } catch {
-            onLog("❌ SOCKS5 错误: \(error.localizedDescription)")
+            // 错误已在内部记录
         }
         
         await connection.close()
         connections.removeValue(forKey: id)
     }
     
-    private func handleSOCKS5(connection: ProxyConnection) async throws {
+    private func handleSOCKS5(connection: OptimizedProxyConnection) async throws {
         // 1. 握手
         let greeting = try await connection.readBytes(2)
         guard greeting[0] == 0x05 else {
@@ -111,9 +120,7 @@ actor SOCKS5Server {
         // 3. 解析目标地址
         let (host, port) = try await parseAddress(connection: connection, addrType: addrType)
         
-        onLog("🔗 SOCKS5 连接: \(host):\(port)")
-        
-        // 4. 连接到远程服务器
+        // 4. 连接到远程服务器 (使用连接池)
         try await connection.connectToRemote(host: host, port: port)
         
         // 5. 发送成功响应
@@ -124,7 +131,7 @@ actor SOCKS5Server {
         await connection.startForwarding()
     }
     
-    private func parseAddress(connection: ProxyConnection, addrType: UInt8) async throws -> (String, Int) {
+    private func parseAddress(connection: OptimizedProxyConnection, addrType: UInt8) async throws -> (String, Int) {
         switch addrType {
         case 0x01: // IPv4
             let addr = try await connection.readBytes(4)
