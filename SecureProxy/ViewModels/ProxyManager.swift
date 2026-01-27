@@ -1,5 +1,5 @@
 // ProxyManager.swift
-// 修复 deinit 中的 Sendable 问题
+// 修复版本 - 解决重连问题
 
 import Foundation
 import Combine
@@ -24,6 +24,10 @@ class ProxyManager: ObservableObject {
     private var timer: Timer?
     private var statsTimer: Timer?
     private var notificationsEnabled = false
+    
+    // 🔧 新增：防止重复启动的标志
+    private var isStarting = false
+    private var isStopping = false
     
     init() {
         let fm = FileManager.default
@@ -117,25 +121,40 @@ class ProxyManager: ObservableObject {
         addLog("🔄 切换到配置: \(config.name)")
         
         if isRunning {
+            addLog("⚠️ 代理正在运行，将重启...")
             stop()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.start()
             }
         }
     }
     
-    // MARK: - Proxy Control
+    // MARK: - Proxy Control (修复版本)
     
     func start() {
+        // 🔧 修复：防止重复启动
+        guard !isStarting else {
+            addLog("⚠️ 代理正在启动中，请稍候...")
+            return
+        }
+        
+        guard !isRunning else {
+            addLog("⚠️ 代理已在运行")
+            return
+        }
+        
         guard let config = activeConfig else {
             addLog("❌ 错误: 没有选中的配置")
             return
         }
-        guard !isRunning else { return }
         
+        isStarting = true
         status = .connecting
-        addLog("🚀 启动代理...")
+        addLog("🚀 准备启动代理...")
         addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
+        if config.sniHost != config.proxyIP {
+            addLog("🌐 CDN 模式: \(config.proxyIP)")
+        }
         addLog("🔐 使用 AES-256-GCM 加密")
         addLog("🔥 启用连接池优化")
         
@@ -147,9 +166,20 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
+            // 🔧 修复：确保旧的连接管理器已完全清理
+            if let oldManager = connectionManager {
+                addLog("🧹 清理旧的连接管理器...")
+                await oldManager.cleanup()
+                connectionManager = nil
+                
+                // 等待一段时间确保资源释放
+                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            }
+            
+            // 创建新的连接管理器
             let manager = OptimizedConnectionManager(
                 config: config,
-                minPoolSize: 0,  // 暂时设为 0 跳过预热,测试用
+                minPoolSize: 0,  // 暂时设为 0 跳过预热
                 maxPoolSize: 20
             )
             
@@ -159,11 +189,12 @@ class ProxyManager: ObservableObject {
                 try await manager.warmup()
                 addLog("✅ 连接池就绪")
             } else {
-                addLog("⚠️ 跳过连接池预热(测试模式)")
+                addLog("ℹ️ 跳过连接池预热(按需创建模式)")
             }
             
             connectionManager = manager
             
+            // 启动 SOCKS5 服务器
             let socks = SOCKS5Server(
                 port: config.socksPort,
                 config: config,
@@ -178,6 +209,7 @@ class ProxyManager: ObservableObject {
             try await socks.start()
             socksServer = socks
             
+            // 启动 HTTP 服务器
             let http = HTTPProxyServer(
                 port: config.httpPort,
                 config: config,
@@ -192,8 +224,11 @@ class ProxyManager: ObservableObject {
             try await http.start()
             httpServer = http
             
+            // 更新状态
             self.isRunning = true
             self.status = .connected
+            self.isStarting = false
+            
             self.addLog("✅ 代理服务启动成功")
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
@@ -211,45 +246,67 @@ class ProxyManager: ObservableObject {
             self.addLog("❌ 启动失败: \(error.localizedDescription)")
             self.status = .disconnected
             self.isRunning = false
+            self.isStarting = false
+            
+            // 清理失败的资源
+            if let manager = connectionManager {
+                await manager.cleanup()
+                connectionManager = nil
+            }
         }
     }
     
     func stop() {
-        addLog("🛑 停止代理...")
+        // 🔧 修复：防止重复停止
+        guard !isStopping else {
+            addLog("⚠️ 代理正在停止中...")
+            return
+        }
+        
+        guard isRunning else {
+            addLog("ℹ️ 代理未运行")
+            return
+        }
+        
+        isStopping = true
+        addLog("🛑 准备停止代理...")
         
         Task {
-            if let socks = socksServer {
-                await socks.stop()
-                await MainActor.run {
-                    socksServer = nil
-                }
-            }
-            
-            if let http = httpServer {
-                await http.stop()
-                await MainActor.run {
-                    httpServer = nil
-                }
-            }
-            
-            if let manager = connectionManager {
-                await manager.cleanup()
-                await MainActor.run {
-                    connectionManager = nil
-                }
-            }
-            
-            await MainActor.run {
-                self.isRunning = false
-                self.status = .disconnected
-                self.trafficUp = 0
-                self.trafficDown = 0
-                self.addLog("✅ 代理已停止")
-                
-                self.statsTimer?.invalidate()
-                self.statsTimer = nil
-            }
+            await stopProxyServers()
         }
+    }
+    
+    @MainActor
+    private func stopProxyServers() async {
+        // 1. 停止服务器
+        if let socks = socksServer {
+            await socks.stop()
+            socksServer = nil
+        }
+        
+        if let http = httpServer {
+            await http.stop()
+            httpServer = nil
+        }
+        
+        // 2. 清理连接管理器
+        if let manager = connectionManager {
+            await manager.cleanup()
+            connectionManager = nil
+        }
+        
+        // 3. 停止统计监控
+        statsTimer?.invalidate()
+        statsTimer = nil
+        
+        // 4. 更新状态
+        self.isRunning = false
+        self.status = .disconnected
+        self.isStopping = false
+        self.trafficUp = 0
+        self.trafficDown = 0
+        
+        self.addLog("✅ 代理已完全停止")
     }
     
     func forceCleanup() {
@@ -274,6 +331,7 @@ class ProxyManager: ObservableObject {
     }
     
     private func startStatsMonitor() {
+        statsTimer?.invalidate()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
@@ -506,11 +564,10 @@ class ProxyManager: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
     
-    // MARK: - Deinit (简化版本 - 移除 Timer 清理)
+    // MARK: - Deinit
     
     deinit {
-        // Timer 会在 RunLoop 中自动清理,无需手动处理
-        // 只清理 actor 资源
+        // 清理 actor 资源
         let socks = socksServer
         let http = httpServer
         let manager = connectionManager

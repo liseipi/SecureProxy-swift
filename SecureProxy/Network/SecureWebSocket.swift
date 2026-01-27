@@ -1,5 +1,5 @@
 // SecureWebSocket.swift
-// 优化版本 - 支持健康检查和连接复用
+// 优化版本 - 移除过度的健康检查，让错误自然发生
 
 import Foundation
 import CryptoKit
@@ -18,26 +18,51 @@ actor SecureWebSocket {
     // 健康检查相关
     private var lastActivityTime = Date()
     private var connectionTime = Date()
-    private let maxIdleTime: TimeInterval = 120 // 2分钟无活动则认为不健康
-    private let maxConnectionAge: TimeInterval = 600 // 10分钟后重建连接
+    private let maxIdleTime: TimeInterval = 120
+    private let maxConnectionAge: TimeInterval = 600
     
     init(config: ProxyConfig) {
         self.config = config
     }
     
-    // 健康检查
+    // 🔧 nonisolated 方法供 delegate 调用
+    nonisolated func notifyConnectionClosed() {
+        Task {
+            await self.handleDelegateClose()
+        }
+    }
+    
+    // 健康检查 - 仅用于连接池判断是否复用
     func isHealthy() -> Bool {
-        guard isConnected else { return false }
-        
-        let now = Date()
-        
-        // 检查空闲时间
-        if now.timeIntervalSince(lastActivityTime) > maxIdleTime {
+        guard isConnected else {
             return false
         }
         
-        // 检查连接年龄
+        guard let task = webSocketTask, session != nil else {
+            return false
+        }
+        
+        // 🔧 关键：检查 WebSocket 的实际状态
+        switch task.state {
+        case .running:
+            break // 只有 running 状态才是健康的
+        case .suspended, .canceling, .completed:
+            return false
+        @unknown default:
+            return false
+        }
+        
+        let now = Date()
+        
+        // 检查空闲时间（只记录，不拒绝）
+        if now.timeIntervalSince(lastActivityTime) > maxIdleTime {
+            print("⚠️ [Health] 连接空闲 \(Int(now.timeIntervalSince(lastActivityTime)))s")
+            return false
+        }
+        
+        // 检查连接年龄（只记录，不拒绝）
         if now.timeIntervalSince(connectionTime) > maxConnectionAge {
+            print("⚠️ [Health] 连接已存活 \(Int(now.timeIntervalSince(connectionTime)))s")
             return false
         }
         
@@ -52,11 +77,22 @@ actor SecureWebSocket {
     // MARK: - Connection
     
     func connect() async throws {
+        // 先确保完全关闭旧连接
+        if isConnected || webSocketTask != nil || session != nil {
+            print("⚠️ [Connect] 检测到旧连接，先关闭")
+            await forceClose()
+        }
+        
         let useCDN = config.sniHost != config.proxyIP
         let actualHost = useCDN ? config.proxyIP : config.sniHost
         
         guard let url = URL(string: "wss://\(actualHost):\(config.serverPort)\(config.path)") else {
             throw WebSocketError.invalidURL
+        }
+        
+        print("🔗 [Connect] 连接到: \(url.absoluteString)")
+        if useCDN {
+            print("🌐 [Connect] CDN 模式 - SNI: \(config.sniHost), IP: \(config.proxyIP)")
         }
         
         var request = URLRequest(url: url)
@@ -65,127 +101,111 @@ actor SecureWebSocket {
         request.setValue("1", forHTTPHeaderField: "X-Protocol-Version")
         request.timeoutInterval = 10
         
-        // 优化的 URLSession 配置
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 300
-        configuration.httpMaximumConnectionsPerHost = 10 // 增加并发连接数
+        configuration.httpMaximumConnectionsPerHost = 10
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil // 禁用缓存减少开销
+        configuration.urlCache = nil
         
-        let delegate = WebSocketDelegate(sniHost: config.sniHost)
+        let delegate = WebSocketDelegate(sniHost: config.sniHost, websocket: self)
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         
-        webSocketTask = session?.webSocketTask(with: request)
+        guard let session = session else {
+            throw WebSocketError.notConnected
+        }
+        
+        webSocketTask = session.webSocketTask(with: request)
         webSocketTask?.resume()
+        
+        print("🔗 [Connect] WebSocket 任务已启动")
         
         try await setupKeys()
         
         isConnected = true
         connectionTime = Date()
         updateActivity()
+        
+        print("✅ [Connect] 连接建立成功 (ID: \(id))")
     }
     
-    // MARK: - Key Exchange (增强错误处理)
+    // 处理 delegate 的关闭回调
+    private func handleDelegateClose() {
+        if isConnected {
+            print("🔴 [WebSocket \(id)] Delegate 通知连接已关闭")
+            isConnected = false
+        }
+    }
+    
+    // MARK: - Key Exchange
     
     private func setupKeys() async throws {
         guard let ws = webSocketTask else {
-            print("❌ WebSocketTask 为 nil")
             throw WebSocketError.notConnected
         }
         
         // 1. 客户端公钥
-        print("1️⃣ 发送客户端公钥...")
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
-        print("   客户端公钥 (前8字节): \(clientPub.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        
         try await ws.send(.data(clientPub))
         updateActivity()
-        print("✅ 客户端公钥已发送 (32字节)")
         
         // 2. 服务器公钥
-        print("2️⃣ 等待服务器公钥...")
         let serverPub = try await recvBinary()
-        print("   收到数据: \(serverPub.count) 字节")
-        
         guard serverPub.count == 32 else {
-            print("❌ 服务器公钥长度错误: 期望32字节，实际\(serverPub.count)字节")
-            print("   数据 (前32字节): \(serverPub.prefix(32).map { String(format: "%02x", $0) }.joined())")
             throw WebSocketError.invalidServerKey
         }
-        print("   服务器公钥 (前8字节): \(serverPub.prefix(8).map { String(format: "%02x", $0) }.joined())")
         updateActivity()
-        print("✅ 收到服务器公钥")
         
         // 3. 密钥派生
-        print("3️⃣ 派生加密密钥...")
         let salt = clientPub + serverPub
-        print("   Salt (前8字节): \(salt.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        
         let psk = hexToData(config.preSharedKey)
-        print("   PSK 长度: \(psk.count) 字节")
-        print("   PSK (前8字节): \(psk.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        
         guard psk.count == 32 else {
-            print("❌ PSK 长度错误: 期望32字节，实际\(psk.count)字节")
             throw WebSocketError.invalidPSK
         }
         
         let keys = deriveKeys(sharedKey: psk, salt: salt)
         sendKey = keys.sendKey
         recvKey = keys.recvKey
-        print("   发送密钥 (前8字节): \(keys.sendKey.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        print("   接收密钥 (前8字节): \(keys.recvKey.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        print("✅ 密钥派生完成")
         
         // 4. 认证
-        print("4️⃣ 发送认证质询...")
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
-        print("   质询 (前8字节): \(challenge.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        
         try await ws.send(.data(challenge))
         updateActivity()
-        print("✅ 认证质询已发送 (32字节)")
         
         // 5. 验证
-        print("5️⃣ 等待认证响应...")
         let authResponse = try await recvBinary()
-        print("   收到数据: \(authResponse.count) 字节")
-        print("   响应 (前8字节): \(authResponse.prefix(8).map { String(format: "%02x", $0) }.joined())")
-        
         let okMessage = "ok".data(using: .utf8)!
         let expected = hmacSHA256(key: keys.recvKey, message: okMessage)
-        print("   期望 (前8字节): \(expected.prefix(8).map { String(format: "%02x", $0) }.joined())")
         
         guard timingSafeEqual(authResponse, expected) else {
-            print("❌ 认证失败: HMAC 不匹配")
-            print("   收到: \(authResponse.map { String(format: "%02x", $0) }.joined())")
-            print("   期望: \(expected.map { String(format: "%02x", $0) }.joined())")
             throw WebSocketError.authenticationFailed
         }
         updateActivity()
-        print("✅ 认证成功")
     }
     
-    // MARK: - Send/Receive (简化版本 - 直接调用)
+    // MARK: - Send/Receive (优化：移除健康检查，让错误自然发生)
     
     func sendConnect(host: String, port: Int) async throws {
         guard let sendKey = sendKey else {
             throw WebSocketError.keysNotEstablished
         }
         
+        guard let task = webSocketTask else {
+            throw WebSocketError.notConnected
+        }
+        
         let target = "\(host):\(port)"
         let message = "CONNECT \(target)".data(using: .utf8)!
         let encrypted = try encrypt(key: sendKey, plaintext: message)
         
-        try await webSocketTask?.send(.data(encrypted))
+        try await task.send(.data(encrypted))
         updateActivity()
         
         let response = try await recv()
         let responseStr = String(data: response, encoding: .utf8) ?? ""
         
-        guard responseStr.starts(with: "OK") else {
+        guard !responseStr.isEmpty && responseStr.starts(with: "OK") else {
             throw WebSocketError.connectionFailed(responseStr)
         }
         updateActivity()
@@ -196,9 +216,20 @@ actor SecureWebSocket {
             throw WebSocketError.keysNotEstablished
         }
         
+        guard let task = webSocketTask else {
+            throw WebSocketError.notConnected
+        }
+        
         let encrypted = try encrypt(key: sendKey, plaintext: data)
-        try await webSocketTask?.send(.data(encrypted))
-        updateActivity()
+        
+        do {
+            try await task.send(.data(encrypted))
+            updateActivity()
+        } catch {
+            // WebSocket 已关闭或出错，更新状态
+            isConnected = false
+            throw error
+        }
     }
     
     func recv() async throws -> Data {
@@ -206,30 +237,31 @@ actor SecureWebSocket {
             throw WebSocketError.keysNotEstablished
         }
         
-        let encrypted = try await recvBinary()
-        updateActivity()
-        return try decrypt(key: recvKey, ciphertext: encrypted)
+        do {
+            let encrypted = try await recvBinary()
+            updateActivity()
+            return try decrypt(key: recvKey, ciphertext: encrypted)
+        } catch {
+            // WebSocket 已关闭或出错，更新状态
+            isConnected = false
+            throw error
+        }
     }
     
-    // MARK: - Internal Receive (简化版本 - 直接接收)
+    // MARK: - Internal Receive
     
     private func recvBinary() async throws -> Data {
         guard let ws = webSocketTask else {
             throw WebSocketError.notConnected
         }
         
-        print("📥 直接调用 receive()...")
-        
-        // 设置超时
         return try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask {
                 let message = try await ws.receive()
                 switch message {
                 case .data(let data):
-                    print("✅ 收到二进制数据: \(data.count) 字节")
                     return data
                 case .string(let text):
-                    print("✅ 收到文本数据: \(text.count) 字符，转换为二进制")
                     return text.data(using: .utf8) ?? Data()
                 @unknown default:
                     throw WebSocketError.invalidFrame
@@ -238,7 +270,6 @@ actor SecureWebSocket {
             
             group.addTask {
                 try await Task.sleep(nanoseconds: 15_000_000_000)
-                print("⏰ 接收超时")
                 throw WebSocketError.receiveTimeout
             }
             
@@ -248,24 +279,40 @@ actor SecureWebSocket {
         }
     }
     
-    private func recvMessage() async throws -> Data {
-        return try await recvBinary()
-    }
-    
     // MARK: - Close
     
     func close() {
         isConnected = false
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        session?.invalidateAndCancel()
-        session = nil
+        
+        if let task = webSocketTask {
+            task.cancel(with: .goingAway, reason: nil)
+            webSocketTask = nil
+        }
+        
+        if let sess = session {
+            sess.invalidateAndCancel()
+            session = nil
+        }
+        
         sendKey = nil
         recvKey = nil
         messageQueue.removeAll()
+        
+        if let cont = messageContinuation {
+            cont.resume(throwing: WebSocketError.notConnected)
+            messageContinuation = nil
+        }
+        
+        lastActivityTime = Date()
+        connectionTime = Date()
     }
     
-    // MARK: - Crypto Helpers (内联优化)
+    private func forceClose() async {
+        close()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+    
+    // MARK: - Crypto Helpers
     
     @inline(__always)
     private func deriveKeys(sharedKey: Data, salt: Data) -> (sendKey: Data, recvKey: Data) {
@@ -340,15 +387,16 @@ actor SecureWebSocket {
     }
 }
 
-// MARK: - WebSocket Delegate (增强版本)
+// MARK: - WebSocket Delegate
 
-final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
+final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let sniHost: String
+    private weak var websocket: SecureWebSocket?
     
-    init(sniHost: String) {
+    init(sniHost: String, websocket: SecureWebSocket) {
         self.sniHost = sniHost
+        self.websocket = websocket
         super.init()
-        print("🔧 [Delegate] 初始化，SNI Host: \(sniHost)")
     }
     
     func urlSession(
@@ -357,9 +405,6 @@ final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
         didOpenWithProtocol protocol: String?
     ) {
         print("✅ [Delegate] WebSocket 已打开")
-        if let proto = `protocol` {
-            print("📋 [Delegate] 协议: \(proto)")
-        }
     }
     
     func urlSession(
@@ -369,9 +414,7 @@ final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
         reason: Data?
     ) {
         print("🔴 [Delegate] WebSocket 已关闭，代码: \(closeCode.rawValue)")
-        if let reason = reason, let reasonString = String(data: reason, encoding: .utf8) {
-            print("📋 [Delegate] 原因: \(reasonString)")
-        }
+        websocket?.notifyConnectionClosed()
     }
     
     func urlSession(
@@ -380,9 +423,8 @@ final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
         didCompleteWithError error: Error?
     ) {
         if let error = error {
-            print("❌ [Delegate] 任务完成但有错误: \(error.localizedDescription)")
-        } else {
-            print("✅ [Delegate] 任务正常完成")
+            print("❌ [Delegate] 连接错误: \(error.localizedDescription)")
+            websocket?.notifyConnectionClosed()
         }
     }
     
@@ -391,18 +433,13 @@ final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        print("🔐 [Delegate] 收到认证质询: \(challenge.protectionSpace.authenticationMethod)")
-        
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
-            print("🔓 [Delegate] 接受服务器证书（用于自签名证书）")
             if let serverTrust = challenge.protectionSpace.serverTrust {
                 let credential = URLCredential(trust: serverTrust)
                 completionHandler(.useCredential, credential)
                 return
             }
         }
-        
-        print("⚠️ [Delegate] 使用默认处理")
         completionHandler(.performDefaultHandling, nil)
     }
 }
@@ -411,6 +448,7 @@ final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
 
 enum WebSocketError: Error {
     case notConnected
+    case connectionClosed
     case invalidURL
     case invalidServerKey
     case invalidPSK
@@ -418,21 +456,25 @@ enum WebSocketError: Error {
     case keysNotEstablished
     case connectionFailed(String)
     case invalidFrame
+    case invalidResponse
     case noData
     case receiveTimeout
     
     var localizedDescription: String {
         switch self {
-        case .notConnected: return "WebSocket not connected"
-        case .invalidURL: return "Invalid WebSocket URL"
-        case .invalidServerKey: return "Invalid server public key"
-        case .invalidPSK: return "Invalid pre-shared key"
-        case .authenticationFailed: return "Authentication failed"
-        case .keysNotEstablished: return "Encryption keys not established"
-        case .connectionFailed(let reason): return "Connection failed: \(reason)"
-        case .invalidFrame: return "Invalid WebSocket frame"
-        case .noData: return "No data received"
-        case .receiveTimeout: return "Receive timeout"
+        case .notConnected: return "WebSocket 未连接"
+        case .connectionClosed: return "WebSocket 连接已关闭"
+        case .invalidURL: return "无效的 WebSocket URL"
+        case .invalidServerKey: return "无效的服务器公钥"
+        case .invalidPSK: return "无效的预共享密钥"
+        case .authenticationFailed: return "认证失败"
+        case .keysNotEstablished: return "加密密钥未建立"
+        case .connectionFailed(let reason):
+            return reason.isEmpty ? "连接失败: 服务器无响应" : "连接失败: \(reason)"
+        case .invalidFrame: return "无效的 WebSocket 帧"
+        case .invalidResponse: return "无效的服务器响应"
+        case .noData: return "没有数据"
+        case .receiveTimeout: return "接收超时"
         }
     }
 }
