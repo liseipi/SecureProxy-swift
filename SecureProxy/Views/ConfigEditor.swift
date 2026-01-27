@@ -3,7 +3,7 @@ import SwiftUI
 struct ConfigEditor: View {
     @State private var name: String
     @State private var sniHost: String
-    @State private var proxyIP: String  // 新增
+    @State private var proxyIP: String
     @State private var path: String
     @State private var serverPort: Int
     @State private var socksPort: Int
@@ -19,7 +19,7 @@ struct ConfigEditor: View {
         self.originalConfig = config
         _name = State(initialValue: config.name)
         _sniHost = State(initialValue: config.sniHost)
-        _proxyIP = State(initialValue: config.proxyIP)  // 新增
+        _proxyIP = State(initialValue: config.proxyIP)
         _path = State(initialValue: config.path)
         _serverPort = State(initialValue: config.serverPort)
         _socksPort = State(initialValue: config.socksPort)
@@ -265,7 +265,7 @@ struct ConfigEditor: View {
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(width: 600, height: 750)
+        .frame(width: 650, height: 800)  // ✅ 增加高度从 750 到 800
         .sheet(isPresented: $showingURLSheet) {
             ConfigURLView(config: currentConfig)
         }
@@ -274,7 +274,7 @@ struct ConfigEditor: View {
     private var isValidConfig: Bool {
         !name.isEmpty &&
         !sniHost.isEmpty &&
-        !proxyIP.isEmpty &&  // 新增验证
+        !proxyIP.isEmpty &&
         !path.isEmpty &&
         serverPort >= 1 && serverPort <= 65535 &&
         socksPort >= 1024 && socksPort <= 65535 &&
@@ -288,7 +288,7 @@ struct ConfigEditor: View {
             id: originalConfig.id,
             name: name,
             sniHost: sniHost,
-            proxyIP: proxyIP,  // 新增
+            proxyIP: proxyIP,
             path: path,
             serverPort: serverPort,
             socksPort: socksPort,
@@ -307,7 +307,6 @@ struct ConfigEditor: View {
     }
     
     private func isIPAddress(_ str: String) -> Bool {
-        // 简单的 IP 地址检测（支持 IPv4 和 IPv6）
         let ipv4Pattern = "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
         let ipv6Pattern = "^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
         
@@ -321,31 +320,31 @@ struct ConfigEditor: View {
     }
 }
 
-// 配置 URL 查看视图
+// MARK: - 配置 URL 查看视图
+
 struct ConfigURLView: View {
     let config: ProxyConfig
     @Environment(\.dismiss) var dismiss
     @State private var copySuccess = false
     
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 24) {  // ✅ 增加间距从 20 到 24
+            // 标题
             HStack {
-                Text("配置链接")
-                    .font(.title2)
-                    .fontWeight(.bold)
+                Text("一键分享配置")
+                    .font(.system(size: 22, weight: .bold))  // ✅ 增加字号
                 Spacer()
             }
             
+            // 说明
             VStack(alignment: .leading, spacing: 8) {
-                Text("一键分享配置")
-                    .font(.headline)
-                
                 Text("复制下方链接，发送给他人即可导入配置")
-                    .font(.caption)
+                    .font(.system(size: 14))
                     .foregroundColor(.secondary)
             }
             
-            VStack(alignment: .leading, spacing: 8) {
+            // 配置链接
+            VStack(alignment: .leading, spacing: 12) {  // ✅ 增加间距
                 HStack {
                     Text("配置链接")
                         .font(.subheadline)
@@ -359,72 +358,110 @@ struct ConfigURLView: View {
                                 .font(.caption)
                                 .foregroundColor(.green)
                         }
+                        .transition(.scale.combined(with: .opacity))
                     }
                 }
                 
-                TextEditor(text: .constant(config.toURLString()))
-                    .font(.system(.body, design: .monospaced))
-                    .frame(height: 120)
-                    .border(Color.gray.opacity(0.5), width: 1)
-                    .cornerRadius(4)
-                    .textSelection(.enabled)
+                ScrollView {
+                    Text(config.toURLString())
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Color.gray.opacity(0.1))
+                        .cornerRadius(8)
+                }
+                .frame(height: 140)  // ✅ 增加高度从 120 到 140
             }
             
+            // 复制按钮
             Button(action: {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(config.toURLString(), forType: .string)
-                copySuccess = true
+                
+                withAnimation {
+                    copySuccess = true
+                }
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    copySuccess = false
+                    withAnimation {
+                        copySuccess = false
+                    }
                 }
             }) {
-                Label("复制到剪贴板", systemImage: "doc.on.doc")
-                    .frame(maxWidth: .infinity)
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.on.doc.fill")
+                        .font(.system(size: 16))
+                    Text("复制到剪贴板")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)  // ✅ 增加内边距
+                .background(
+                    LinearGradient(
+                        colors: [Color.blue, Color.blue.opacity(0.8)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .cornerRadius(10)
+                .shadow(color: Color.blue.opacity(0.3), radius: 8, x: 0, y: 4)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.plain)
             
             Divider()
+                .padding(.vertical, 8)  // ✅ 增加分隔线边距
             
-            VStack(alignment: .leading, spacing: 8) {
+            // 使用说明
+            VStack(alignment: .leading, spacing: 12) {  // ✅ 增加间距
                 Text("如何使用")
                     .font(.headline)
                 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("1.")
-                            .foregroundColor(.secondary)
-                        Text("点击上方按钮复制配置链接")
-                            .font(.caption)
-                    }
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("2.")
-                            .foregroundColor(.secondary)
-                        Text("发送链接给需要的人")
-                            .font(.caption)
-                    }
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("3.")
-                            .foregroundColor(.secondary)
-                        Text("接收方点击「导入/导出」→「快速导入」粘贴链接即可")
-                            .font(.caption)
-                    }
+                VStack(alignment: .leading, spacing: 8) {  // ✅ 增加间距
+                    InstructionRow(number: "1", text: "点击上方按钮复制配置链接")
+                    InstructionRow(number: "2", text: "发送链接给需要的人")
+                    InstructionRow(number: "3", text: "接收方点击「导入/导出」→「粘贴链接导入」即可")
                 }
             }
             
             Spacer()
             
+            // 关闭按钮
             HStack {
                 Spacer()
                 Button("关闭") {
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
         }
-        .padding()
-        .frame(width: 500, height: 450)
+        .padding(28)  // ✅ 增加内边距从 20 到 28
+        .frame(width: 550, height: 580)  // ✅ 调整尺寸：宽度 500→550，高度 450→580
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+// MARK: - 辅助视图
+
+struct InstructionRow: View {
+    let number: String
+    let text: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number + ".")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.blue)
+                .frame(width: 20, alignment: .leading)
+            
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

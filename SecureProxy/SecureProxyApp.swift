@@ -7,14 +7,14 @@ struct SecureProxyApp: App {
     @StateObject private var manager = ProxyManager()
     
     var body: some Scene {
-        // 主控制窗口
+        // 主控制窗口 - ✅ 修复为可调整大小
         Window("SecureProxy", id: "main") {
             ContentView()
                 .environmentObject(manager)
-                .frame(minWidth: 600, minHeight: 500)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultPosition(.center)
+        .defaultSize(width: 900, height: 700)  // ✅ 设置默认尺寸而非固定尺寸
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 SecureProxy") {
@@ -32,16 +32,16 @@ struct SecureProxyApp: App {
             }
         }
         
-        // 日志窗口
+        // 日志窗口 - ✅ 也改为可调整大小
         Window("运行日志", id: "logs") {
             LogsWindowView()
                 .environmentObject(manager)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultPosition(.center)
-        .defaultSize(width: 700, height: 450)
+        .defaultSize(width: 800, height: 550)  // ✅ 设置默认尺寸
         
-        // 菜单栏图标：改为 .window 样式
+        // 菜单栏图标
         MenuBarExtra {
             MenuBarView(appDelegate: appDelegate)
                 .environmentObject(manager)
@@ -81,7 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 window.level = .normal
             }
         } else {
-            // 如果窗口已销毁则重新触发环境中的 openWindow (通过 Notification 或其他机制)
+            // 如果窗口已销毁则重新触发环境中的 openWindow
             NotificationCenter.default.post(name: .openMainWindow, object: nil)
         }
     }
@@ -199,7 +199,7 @@ struct MenuBarView: View {
             }
             .padding(8)
         }
-        .frame(width: 200) // 固定窗口宽度
+        .frame(width: 200)
     }
 }
 
