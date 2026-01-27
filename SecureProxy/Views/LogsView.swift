@@ -1,8 +1,8 @@
 import SwiftUI
 
-// ✅ 已更新为使用 MultiplexedProxyManager
+// ✅ 已更新为使用 ProxyManager
 struct LogsWindowView: View {
-    @EnvironmentObject var manager: MultiplexedProxyManager  // ✅ 修改类型
+    @EnvironmentObject var manager: ProxyManager  // ✅ 修改类型
     
     var body: some View {
         LogsView(logs: manager.logs, onClear: {

@@ -1,5 +1,6 @@
-// MultiplexedProxyManager.swift
-// 使用多路复用连接的代理管理器
+// ProxyManager.swift
+// 重构后的代理管理器 - 模拟 client.js 的稳定架构
+// ✅ 真正的连接池复用
 
 import Foundation
 import Combine
@@ -7,7 +8,7 @@ import AppKit
 import UniformTypeIdentifiers
 import UserNotifications
 
-class MultiplexedProxyManager: ObservableObject {
+class ProxyManager: ObservableObject {
     @Published var configs: [ProxyConfig] = []
     @Published var activeConfig: ProxyConfig?
     @Published var status: ProxyStatus = .disconnected
@@ -17,9 +18,9 @@ class MultiplexedProxyManager: ObservableObject {
     @Published var logs: [String] = []
     @Published var showingLogs = false
     
-    private var socksServer: MultiplexedSOCKS5Server?
-    private var httpServer: MultiplexedHTTPProxyServer?
-    private var connectionManager: MultiplexedConnectionManager?
+    private var socksServer: SOCKS5Server?
+    private var httpServer: HTTPProxyServer?
+    private var connectionManager: ConnectionManager?
     private var configDirectory: URL
     private var timer: Timer?
     private var statsTimer: Timer?
@@ -42,8 +43,8 @@ class MultiplexedProxyManager: ObservableObject {
         startTrafficMonitor()
         
         addLog("✅ ProxyManager 初始化完成")
-        addLog("🚀 使用多路复用连接池 v4.0")
-        addLog("ℹ️  每个 WebSocket 支持多个并发请求，大幅提升性能")
+        addLog("🚀 使用连接池架构 v4.0 (模拟 client.js)")
+        addLog("ℹ️  真正的连接复用，稳定高效")
     }
     
     private func requestNotificationPermission() {
@@ -64,7 +65,7 @@ class MultiplexedProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - Config Management (保持不变)
+    // MARK: - Config Management
     
     func loadConfigs() {
         let fm = FileManager.default
@@ -129,7 +130,7 @@ class MultiplexedProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - Proxy Control (使用多路复用)
+    // MARK: - Proxy Control
     
     func start() {
         guard !isStarting else {
@@ -149,13 +150,13 @@ class MultiplexedProxyManager: ObservableObject {
         
         isStarting = true
         status = .connecting
-        addLog("🚀 准备启动代理（多路复用模式）...")
+        addLog("🚀 准备启动代理（连接池模式）...")
         addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
         if config.sniHost != config.proxyIP {
             addLog("🌐 CDN 模式: \(config.proxyIP)")
         }
         addLog("🔐 使用 AES-256-GCM 加密")
-        addLog("🌟 启用 WebSocket 多路复用，大幅提升并发性能")
+        addLog("🌟 模拟 client.js 的稳定架构")
         
         Task {
             await startProxyServers(config: config)
@@ -173,11 +174,11 @@ class MultiplexedProxyManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             
-            // 创建多路复用连接管理器
-            let manager = MultiplexedConnectionManager(
+            // 创建连接池管理器
+            let manager = ConnectionManager(
                 config: config,
-                minPoolSize: 2,   // 只需要少量连接
-                maxPoolSize: 5    // 每个连接可处理多个请求
+                minPoolSize: 3,   // 最小连接数
+                maxPoolSize: 10   // 最大连接数
             )
             
             connectionManager = manager
@@ -186,7 +187,7 @@ class MultiplexedProxyManager: ObservableObject {
             try await manager.warmup()
             
             // 启动 SOCKS5 服务器
-            let socks = MultiplexedSOCKS5Server(
+            let socks = SOCKS5Server(
                 port: config.socksPort,
                 config: config,
                 connectionManager: manager,
@@ -201,7 +202,7 @@ class MultiplexedProxyManager: ObservableObject {
             socksServer = socks
             
             // 启动 HTTP 服务器
-            let http = MultiplexedHTTPProxyServer(
+            let http = HTTPProxyServer(
                 port: config.httpPort,
                 config: config,
                 connectionManager: manager,
@@ -220,15 +221,15 @@ class MultiplexedProxyManager: ObservableObject {
             self.status = .connected
             self.isStarting = false
             
-            self.addLog("✅ 代理服务启动成功（多路复用模式）")
+            self.addLog("✅ 代理服务启动成功（连接池模式）")
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
-            self.addLog("ℹ️  并发性能大幅提升，无需担心连接池耗尽")
+            self.addLog("ℹ️  连接复用，性能稳定")
             
             if notificationsEnabled {
                 self.showNotification(
                     title: "代理已启动",
-                    message: "多路复用模式 - SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
+                    message: "连接池模式 - SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
                 )
             }
             
@@ -370,7 +371,7 @@ class MultiplexedProxyManager: ObservableObject {
         addLog("🗑️ 日志已清除")
     }
     
-    // MARK: - Import/Export (保持不变)
+    // MARK: - Import/Export
     
     func copyConfigURL(_ config: ProxyConfig) {
         let urlString = config.toURLString()

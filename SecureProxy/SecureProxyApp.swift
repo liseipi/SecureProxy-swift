@@ -6,7 +6,7 @@ struct SecureProxyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     // ✅ 修改：使用多路复用管理器
-    @StateObject private var manager = MultiplexedProxyManager()
+    @StateObject private var manager = ProxyManager()
     
     var body: some Scene {
         Window("SecureProxy", id: "main") {
@@ -110,8 +110,8 @@ struct MenuBarLabel: View {
 struct MenuBarView: View {
     let appDelegate: AppDelegate
     
-    // ✅ 修改：类型改为 MultiplexedProxyManager
-    @EnvironmentObject var manager: MultiplexedProxyManager
+    // ✅ 修改：类型改为 ProxyManager
+    @EnvironmentObject var manager: ProxyManager
     @Environment(\.openWindow) var openWindow
     
     var body: some View {
