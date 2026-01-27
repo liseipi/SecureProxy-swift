@@ -1,22 +1,22 @@
-// HTTPProxyServer.swift
-// 使用连接池优化版本
+// MultiplexedHTTPProxyServer.swift
+// 使用多路复用的 HTTP CONNECT 代理服务器
 
 import Foundation
 import Network
 
-actor HTTPProxyServer {
+actor MultiplexedHTTPProxyServer {
     private let port: Int
     private let config: ProxyConfig
-    private let connectionManager: OptimizedConnectionManager
+    private let connectionManager: MultiplexedConnectionManager
     private var listener: NWListener?
-    private var connections: [UUID: OptimizedProxyConnection] = [:]
+    private var connections: [UUID: MultiplexedProxyConnection] = [:]
     
     nonisolated let onLog: @Sendable (String) -> Void
     
     init(
         port: Int,
         config: ProxyConfig,
-        connectionManager: OptimizedConnectionManager,
+        connectionManager: MultiplexedConnectionManager,
         onLog: @escaping @Sendable (String) -> Void
     ) {
         self.port = port
@@ -44,7 +44,7 @@ actor HTTPProxyServer {
         }
         
         listener?.start(queue: .global())
-        onLog("✅ HTTP 代理服务器启动: 127.0.0.1:\(port)")
+        onLog("✅ HTTP 代理服务器启动: 127.0.0.1:\(port) (多路复用模式)")
     }
     
     func stop() {
@@ -74,7 +74,7 @@ actor HTTPProxyServer {
     
     private func handleNewConnection(_ nwConnection: NWConnection) async {
         let id = UUID()
-        let connection = OptimizedProxyConnection(
+        let connection = MultiplexedProxyConnection(
             id: id,
             clientConnection: nwConnection,
             config: config,
@@ -87,14 +87,14 @@ actor HTTPProxyServer {
         do {
             try await handleHTTPConnect(connection: connection)
         } catch {
-            // 错误已在内部记录
+            // 错误已记录
         }
         
         await connection.close()
         connections.removeValue(forKey: id)
     }
     
-    private func handleHTTPConnect(connection: OptimizedProxyConnection) async throws {
+    private func handleHTTPConnect(connection: MultiplexedProxyConnection) async throws {
         // 读取请求行
         let requestLine = try await connection.readLine()
         
@@ -132,7 +132,7 @@ actor HTTPProxyServer {
             }
         }
         
-        // 连接到远程服务器 (使用连接池)
+        // 连接到远程（打开一个流）
         try await connection.connectToRemote(host: host, port: port)
         
         // 发送成功响应

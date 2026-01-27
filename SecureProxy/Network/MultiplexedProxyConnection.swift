@@ -1,18 +1,18 @@
-// ProxyConnection.swift
-// 修复版本 - 增强错误处理和日志
+// MultiplexedProxyConnection.swift
+// 使用多路复用流的代理连接处理器
 
 import Foundation
 import Network
 
-actor OptimizedProxyConnection {
+actor MultiplexedProxyConnection {
     let id: UUID
     private let clientConnection: NWConnection
     private let config: ProxyConfig
-    private let connectionManager: OptimizedConnectionManager
+    private let connectionManager: MultiplexedConnectionManager
     
     nonisolated let onLog: @Sendable (String) -> Void
     
-    private var remoteWebSocket: SecureWebSocket?
+    private var stream: Stream?
     private var isForwarding = false
     private var bytesSent: Int64 = 0
     private var bytesReceived: Int64 = 0
@@ -21,7 +21,7 @@ actor OptimizedProxyConnection {
         id: UUID,
         clientConnection: NWConnection,
         config: ProxyConfig,
-        connectionManager: OptimizedConnectionManager,
+        connectionManager: MultiplexedConnectionManager,
         onLog: @escaping @Sendable (String) -> Void
     ) {
         self.id = id
@@ -60,15 +60,13 @@ actor OptimizedProxyConnection {
             let byte = try await readBytes(1)
             buffer.append(byte)
             
-            // 检查是否为行尾
             if buffer.count >= 2 {
                 let lastTwo = buffer.suffix(2)
-                if lastTwo == Data([0x0D, 0x0A]) { // \r\n
+                if lastTwo == Data([0x0D, 0x0A]) {
                     break
                 }
             }
             
-            // 防止无限读取
             if buffer.count > 8192 {
                 throw ProxyError.lineTooLong
             }
@@ -92,41 +90,18 @@ actor OptimizedProxyConnection {
         }
     }
     
-    // MARK: - Remote Connection (使用连接池)
+    // MARK: - Remote Connection (使用多路复用流)
     
     func connectToRemote(host: String, port: Int) async throws {
-        onLog("🔗 开始连接远程服务器: \(host):\(port)")
-        
-        // 从连接池获取连接
-        let ws: SecureWebSocket
-        do {
-            ws = try await connectionManager.acquire()
-            onLog("✅ 从连接池获取连接成功: \(ws.id)")
-        } catch {
-            onLog("❌ 从连接池获取连接失败: \(error.localizedDescription)")
-            throw error
-        }
+        onLog("🔗 连接远程: \(host):\(port)")
         
         do {
-            try await ws.sendConnect(host: host, port: port)
-            remoteWebSocket = ws
-            onLog("✅ 远程连接建立成功: \(host):\(port)")
+            // 从连接管理器获取一个流（不是整个连接）
+            let newStream = try await connectionManager.openStream(host: host, port: port)
+            stream = newStream
+            onLog("✅ 流 #\(newStream.id) 已建立")
         } catch {
-            // 🔧 关键修复：sendConnect 失败时，连接已不可用
-            onLog("❌ 远程连接失败: \(error.localizedDescription)")
-            
-            // 详细的错误信息
-            if let wsError = error as? WebSocketError {
-                onLog("🔍 WebSocket 错误详情: \(wsError.errorDescription ?? "未知错误")")
-            } else if let nsError = error as NSError? {
-                onLog("🔍 系统错误详情: 域=\(nsError.domain), 代码=\(nsError.code), 描述=\(nsError.localizedDescription)")
-            }
-            
-            // 🔧 立即关闭并释放连接（让连接池知道这个连接已损坏）
-            onLog("🔴 关闭失败的连接: \(ws.id)")
-            await ws.close()  // 先关闭
-            await connectionManager.release(ws)  // 再释放（release 会检测到不健康并移除）
-            
+            onLog("❌ 打开流失败: \(error.localizedDescription)")
             throw error
         }
     }
@@ -134,19 +109,17 @@ actor OptimizedProxyConnection {
     // MARK: - Forwarding
     
     func startForwarding() async {
-        guard let ws = remoteWebSocket else {
-            onLog("⚠️ 没有远程连接，无法开始转发")
+        guard let stream = stream else {
+            onLog("⚠️ 没有流，无法转发")
             return
         }
         
         isForwarding = true
-        onLog("🔄 开始双向数据转发")
         
         // 创建双向转发任务
-        async let clientToRemote: Void = forwardClientToRemote(ws: ws)
-        async let remoteToClient: Void = forwardRemoteToClient(ws: ws)
+        async let clientToRemote: Void = forwardClientToRemote(stream: stream)
+        async let remoteToClient: Void = forwardRemoteToClient(stream: stream)
         
-        // 等待任一方向完成
         _ = await (clientToRemote, remoteToClient)
         
         isForwarding = false
@@ -154,35 +127,33 @@ actor OptimizedProxyConnection {
         if bytesSent > 0 || bytesReceived > 0 {
             let sentMB = Double(bytesSent) / 1024 / 1024
             let recvMB = Double(bytesReceived) / 1024 / 1024
-            onLog(String(format: "📊 连接关闭 - 上传: %.2f MB, 下载: %.2f MB", sentMB, recvMB))
+            onLog(String(format: "📊 流 #\(stream.id) 关闭 - 上传: %.2f MB, 下载: %.2f MB", sentMB, recvMB))
         }
     }
     
-    private func forwardClientToRemote(ws: SecureWebSocket) async {
+    private func forwardClientToRemote(stream: Stream) async {
         while isForwarding {
             do {
                 let data = try await readFromClient()
                 guard !data.isEmpty else { break }
                 
-                try await ws.send(data)
+                try await stream.send(data)
                 bytesSent += Int64(data.count)
             } catch {
-                // onLog("⚠️ 客户端->远程转发中断: \(error.localizedDescription)")
                 break
             }
         }
     }
     
-    private func forwardRemoteToClient(ws: SecureWebSocket) async {
+    private func forwardRemoteToClient(stream: Stream) async {
         while isForwarding {
             do {
-                let data = try await ws.recv()
+                let data = try await stream.receive()
                 guard !data.isEmpty else { break }
                 
                 try await writeToClient(data)
                 bytesReceived += Int64(data.count)
             } catch {
-                // onLog("⚠️ 远程->客户端转发中断: \(error.localizedDescription)")
                 break
             }
         }
@@ -214,9 +185,9 @@ actor OptimizedProxyConnection {
         
         clientConnection.cancel()
         
-        if let ws = remoteWebSocket {
-            await connectionManager.release(ws)
-            remoteWebSocket = nil
+        if let stream = stream {
+            await stream.close()
+            self.stream = nil
         }
     }
 }

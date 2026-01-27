@@ -1,10 +1,11 @@
 // ContentView.swift
 // 美化版本 - 现代化设计
+// ✅ 已更新为使用 MultiplexedProxyManager
 
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject var manager: ProxyManager
+    @EnvironmentObject var manager: MultiplexedProxyManager  // ✅ 修改类型
     @State private var showingConfigEditor = false
     @State private var editingConfig: ProxyConfig? = nil
     @State private var showingURLImport = false
@@ -127,7 +128,7 @@ struct ContentView: View {
 // MARK: - Modern Status Bar
 
 struct ModernStatusBar: View {
-    @ObservedObject var manager: ProxyManager
+    @ObservedObject var manager: MultiplexedProxyManager  // ✅ 修改类型
     let openWindow: (String) -> Void
     
     var body: some View {
@@ -832,7 +833,7 @@ struct ModernToggleStyle: ToggleStyle {
     }
 }
 
-// MARK: - URL Import Sheet (保持原有实现)
+// MARK: - URL Import Sheet
 
 struct URLImportSheet: View {
     @Binding var urlString: String
@@ -923,5 +924,5 @@ struct URLImportSheet: View {
 
 #Preview {
     ContentView()
-        .environmentObject(ProxyManager())
+        .environmentObject(MultiplexedProxyManager())  // ✅ 使用新类型
 }

@@ -1,5 +1,5 @@
-// ProxyManager.swift
-// 修复版本 - 增加自动重连和更好的错误处理
+// MultiplexedProxyManager.swift
+// 使用多路复用连接的代理管理器
 
 import Foundation
 import Combine
@@ -7,7 +7,7 @@ import AppKit
 import UniformTypeIdentifiers
 import UserNotifications
 
-class ProxyManager: ObservableObject {
+class MultiplexedProxyManager: ObservableObject {
     @Published var configs: [ProxyConfig] = []
     @Published var activeConfig: ProxyConfig?
     @Published var status: ProxyStatus = .disconnected
@@ -17,23 +17,16 @@ class ProxyManager: ObservableObject {
     @Published var logs: [String] = []
     @Published var showingLogs = false
     
-    private var socksServer: SOCKS5Server?
-    private var httpServer: HTTPProxyServer?
-    private var connectionManager: OptimizedConnectionManager?
+    private var socksServer: MultiplexedSOCKS5Server?
+    private var httpServer: MultiplexedHTTPProxyServer?
+    private var connectionManager: MultiplexedConnectionManager?
     private var configDirectory: URL
     private var timer: Timer?
     private var statsTimer: Timer?
     private var notificationsEnabled = false
     
-    // 防止重复启动的标志
     private var isStarting = false
     private var isStopping = false
-    
-    // 🔧 新增：自动重连
-    private var autoReconnect = true
-    private var reconnectAttempts = 0
-    private var maxReconnectAttempts = 5
-    private var reconnectTimer: Timer?
     
     init() {
         let fm = FileManager.default
@@ -49,7 +42,8 @@ class ProxyManager: ObservableObject {
         startTrafficMonitor()
         
         addLog("✅ ProxyManager 初始化完成")
-        addLog("🚀 使用优化连接池 v3.3")
+        addLog("🚀 使用多路复用连接池 v4.0")
+        addLog("ℹ️  每个 WebSocket 支持多个并发请求，大幅提升性能")
     }
     
     private func requestNotificationPermission() {
@@ -70,7 +64,7 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - Config Management
+    // MARK: - Config Management (保持不变)
     
     func loadConfigs() {
         let fm = FileManager.default
@@ -135,7 +129,7 @@ class ProxyManager: ObservableObject {
         }
     }
     
-    // MARK: - Proxy Control
+    // MARK: - Proxy Control (使用多路复用)
     
     func start() {
         guard !isStarting else {
@@ -153,18 +147,15 @@ class ProxyManager: ObservableObject {
             return
         }
         
-        // 🔧 重置重连计数
-        reconnectAttempts = 0
-        
         isStarting = true
         status = .connecting
-        addLog("🚀 准备启动代理...")
+        addLog("🚀 准备启动代理（多路复用模式）...")
         addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
         if config.sniHost != config.proxyIP {
             addLog("🌐 CDN 模式: \(config.proxyIP)")
         }
         addLog("🔐 使用 AES-256-GCM 加密")
-        addLog("🔥 启用连接池优化")
+        addLog("🌟 启用 WebSocket 多路复用，大幅提升并发性能")
         
         Task {
             await startProxyServers(config: config)
@@ -174,7 +165,7 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
-            // 确保旧的连接管理器已完全清理
+            // 清理旧的连接管理器
             if let oldManager = connectionManager {
                 addLog("🧹 清理旧的连接管理器...")
                 await oldManager.cleanup()
@@ -182,17 +173,20 @@ class ProxyManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             
-            // 创建新的连接管理器
-            let manager = OptimizedConnectionManager(
+            // 创建多路复用连接管理器
+            let manager = MultiplexedConnectionManager(
                 config: config,
-                minPoolSize: 0,  // 按需创建模式
-                maxPoolSize: 20
+                minPoolSize: 2,   // 只需要少量连接
+                maxPoolSize: 5    // 每个连接可处理多个请求
             )
             
             connectionManager = manager
             
+            // 预热连接池
+            try await manager.warmup()
+            
             // 启动 SOCKS5 服务器
-            let socks = SOCKS5Server(
+            let socks = MultiplexedSOCKS5Server(
                 port: config.socksPort,
                 config: config,
                 connectionManager: manager,
@@ -207,7 +201,7 @@ class ProxyManager: ObservableObject {
             socksServer = socks
             
             // 启动 HTTP 服务器
-            let http = HTTPProxyServer(
+            let http = MultiplexedHTTPProxyServer(
                 port: config.httpPort,
                 config: config,
                 connectionManager: manager,
@@ -226,17 +220,15 @@ class ProxyManager: ObservableObject {
             self.status = .connected
             self.isStarting = false
             
-            // 🔧 重置重连计数
-            self.reconnectAttempts = 0
-            
-            self.addLog("✅ 代理服务启动成功")
+            self.addLog("✅ 代理服务启动成功（多路复用模式）")
             self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
             self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
+            self.addLog("ℹ️  并发性能大幅提升，无需担心连接池耗尽")
             
             if notificationsEnabled {
                 self.showNotification(
                     title: "代理已启动",
-                    message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
+                    message: "多路复用模式 - SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
                 )
             }
             
@@ -248,23 +240,9 @@ class ProxyManager: ObservableObject {
             self.isRunning = false
             self.isStarting = false
             
-            // 清理失败的资源
             if let manager = connectionManager {
                 await manager.cleanup()
                 connectionManager = nil
-            }
-            
-            // 🔧 尝试自动重连
-            if autoReconnect && reconnectAttempts < maxReconnectAttempts {
-                reconnectAttempts += 1
-                let delay = min(reconnectAttempts * 2, 10)  // 最多等待 10 秒
-                self.addLog("🔄 \(delay) 秒后自动重连 (尝试 \(reconnectAttempts)/\(maxReconnectAttempts))...")
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay)) {
-                    self.start()
-                }
-            } else if reconnectAttempts >= maxReconnectAttempts {
-                self.addLog("❌ 已达到最大重连次数，请手动重试")
             }
         }
     }
@@ -279,11 +257,6 @@ class ProxyManager: ObservableObject {
             addLog("ℹ️ 代理未运行")
             return
         }
-        
-        // 🔧 停止自动重连
-        reconnectTimer?.invalidate()
-        reconnectTimer = nil
-        reconnectAttempts = 0
         
         isStopping = true
         addLog("🛑 准备停止代理...")
@@ -326,7 +299,6 @@ class ProxyManager: ObservableObject {
         self.addLog("✅ 代理已完全停止")
     }
     
-    // 🔧 新增：手动重建连接池
     func rebuildConnectionPool() {
         guard let manager = connectionManager, isRunning else {
             addLog("⚠️ 代理未运行，无法重建连接池")
@@ -377,10 +349,7 @@ class ProxyManager: ObservableObject {
             
             Task {
                 if let manager = await self.connectionManager {
-                    let stats = await manager.getStats()
-                    await MainActor.run {
-                        self.addLog("📊 连接池: 总数=\(stats.poolSize), 忙碌=\(stats.busy), 创建=\(stats.created), 复用=\(stats.reused), 失败=\(stats.failed)")
-                    }
+                    await manager.printStats()
                 }
             }
         }
@@ -401,7 +370,7 @@ class ProxyManager: ObservableObject {
         addLog("🗑️ 日志已清除")
     }
     
-    // MARK: - Import/Export
+    // MARK: - Import/Export (保持不变)
     
     func copyConfigURL(_ config: ProxyConfig) {
         let urlString = config.toURLString()
@@ -602,30 +571,5 @@ class ProxyManager: ObservableObject {
         )
         
         UNUserNotificationCenter.current().add(request)
-    }
-    
-    // MARK: - Cleanup
-    
-    deinit {
-        // 🔧 注意：deinit 是 nonisolated 的，不能直接访问 Timer
-        // Timer 会在对象销毁时自动失效
-        
-        let socks = socksServer
-        let http = httpServer
-        let manager = connectionManager
-        
-        if socks != nil || http != nil || manager != nil {
-            Task {
-                if let socks = socks {
-                    await socks.stop()
-                }
-                if let http = http {
-                    await http.stop()
-                }
-                if let manager = manager {
-                    await manager.cleanup()
-                }
-            }
-        }
     }
 }

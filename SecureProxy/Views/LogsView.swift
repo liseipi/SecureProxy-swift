@@ -1,8 +1,8 @@
 import SwiftUI
 
-// ✅ 新增：日志窗口包装器
+// ✅ 已更新为使用 MultiplexedProxyManager
 struct LogsWindowView: View {
-    @EnvironmentObject var manager: ProxyManager
+    @EnvironmentObject var manager: MultiplexedProxyManager  // ✅ 修改类型
     
     var body: some View {
         LogsView(logs: manager.logs, onClear: {

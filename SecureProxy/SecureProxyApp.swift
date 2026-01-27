@@ -4,26 +4,27 @@ import AppKit
 @main
 struct SecureProxyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var manager = ProxyManager()
+    
+    // ✅ 修改：使用多路复用管理器
+    @StateObject private var manager = MultiplexedProxyManager()
     
     var body: some Scene {
-        // 主控制窗口 - ✅ 修复为可调整大小
         Window("SecureProxy", id: "main") {
             ContentView()
                 .environmentObject(manager)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultPosition(.center)
-        .defaultSize(width: 900, height: 700)  // ✅ 设置默认尺寸而非固定尺寸
+        .defaultSize(width: 900, height: 700)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 SecureProxy") {
                     NSApplication.shared.orderFrontStandardAboutPanel(
                         options: [
                             NSApplication.AboutPanelOptionKey.applicationName: "SecureProxy Swift",
-                            NSApplication.AboutPanelOptionKey.applicationVersion: "2.0.0",
+                            NSApplication.AboutPanelOptionKey.applicationVersion: "3.0.0",  // 版本号更新
                             NSApplication.AboutPanelOptionKey.credits: NSAttributedString(
-                                string: "纯 Swift 实现的安全代理客户端\n支持 SOCKS5 和 HTTP 代理\n基于 Network.framework",
+                                string: "纯 Swift 实现的安全代理客户端\n支持 SOCKS5 和 HTTP 代理\n基于 Network.framework\n✨ WebSocket 多路复用技术",
                                 attributes: [NSAttributedString.Key.font: NSFont.systemFont(ofSize: 11)]
                             )
                         ]
@@ -32,16 +33,14 @@ struct SecureProxyApp: App {
             }
         }
         
-        // 日志窗口 - ✅ 也改为可调整大小
         Window("运行日志", id: "logs") {
             LogsWindowView()
                 .environmentObject(manager)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultPosition(.center)
-        .defaultSize(width: 800, height: 550)  // ✅ 设置默认尺寸
+        .defaultSize(width: 800, height: 550)
         
-        // 菜单栏图标
         MenuBarExtra {
             MenuBarView(appDelegate: appDelegate)
                 .environmentObject(manager)
@@ -52,10 +51,9 @@ struct SecureProxyApp: App {
     }
 }
 
-// MARK: - AppDelegate 窗口调度逻辑
+// MARK: - AppDelegate (保持不变)
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 设置为 accessory，这样点击 Dock 不会弹出窗口，由菜单栏控制
         NSApp.setActivationPolicy(.accessory)
     }
     
@@ -81,7 +79,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 window.level = .normal
             }
         } else {
-            // 如果窗口已销毁则重新触发环境中的 openWindow
             NotificationCenter.default.post(name: .openMainWindow, object: nil)
         }
     }
@@ -91,7 +88,7 @@ extension Notification.Name {
     static let openMainWindow = Notification.Name("openMainWindow")
 }
 
-// MARK: - 菜单栏图标 Label
+// MARK: - 菜单栏组件 (保持不变)
 struct MenuBarLabel: View {
     let isRunning: Bool
     let status: ProxyStatus
@@ -110,15 +107,15 @@ struct MenuBarLabel: View {
     }
 }
 
-// MARK: - 重构后的 MenuBarView (Window 样式)
 struct MenuBarView: View {
     let appDelegate: AppDelegate
-    @EnvironmentObject var manager: ProxyManager
+    
+    // ✅ 修改：类型改为 MultiplexedProxyManager
+    @EnvironmentObject var manager: MultiplexedProxyManager
     @Environment(\.openWindow) var openWindow
     
     var body: some View {
         VStack(spacing: 0) {
-            // 1. 顶部状态栏
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -139,7 +136,6 @@ struct MenuBarView: View {
                 
                 Spacer()
                 
-                // 运行开关
                 Toggle("", isOn: Binding(
                     get: { manager.isRunning },
                     set: { newValue in
@@ -156,7 +152,6 @@ struct MenuBarView: View {
             
             Divider()
             
-            // 2. 流量详情面板 (仅在运行时显示)
             if manager.isRunning {
                 VStack(spacing: 10) {
                     HStack(spacing: 0) {
@@ -174,13 +169,22 @@ struct MenuBarView: View {
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                     }
+                    
+                    // ✅ 新增：多路复用状态指示
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 9))
+                            .foregroundColor(.purple)
+                        Text("多路复用")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.purple)
+                    }
                 }
                 .padding(.vertical, 12)
                 
                 Divider()
             }
             
-            // 3. 操作按钮区
             VStack(spacing: 4) {
                 MenuRowButton(title: "控制中心", icon: "macwindow") {
                     appDelegate.showMainWindow()
@@ -203,7 +207,6 @@ struct MenuBarView: View {
     }
 }
 
-// MARK: - 辅助子视图
 struct TrafficStatsView: View {
     let title: String
     let value: Double

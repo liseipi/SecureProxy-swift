@@ -1,10 +1,10 @@
 // Views/StatusBar.swift
-// 修复版本 - 支持 SwiftProxyManager
+// ✅ 已更新为使用 MultiplexedProxyManager
 
 import SwiftUI
 
 struct StatusBar: View {
-    @ObservedObject var manager: ProxyManager
+    @ObservedObject var manager: MultiplexedProxyManager  // ✅ 修改类型
     let openWindow: (String) -> Void
     
     var body: some View {
