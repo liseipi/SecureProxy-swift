@@ -183,6 +183,17 @@ struct ModernStatusBar: View {
                 
                 // 右侧：控制按钮
                 HStack(spacing: 12) {
+                    // 开关
+                    Toggle("", isOn: Binding(
+                        get: { manager.isRunning },
+                        set: { isOn in
+                            if isOn { manager.start() }
+                            else { manager.stop() }
+                        }
+                    ))
+                    .toggleStyle(ModernToggleStyle())
+                    .scaleEffect(1.1)
+                    
                     // 查看日志按钮
                     Button(action: { openWindow("logs") }) {
                         HStack(spacing: 6) {
@@ -205,16 +216,6 @@ struct ModernStatusBar: View {
                     }
                     .buttonStyle(PlainButtonStyle())
                     
-                    // 开关
-                    Toggle("", isOn: Binding(
-                        get: { manager.isRunning },
-                        set: { isOn in
-                            if isOn { manager.start() }
-                            else { manager.stop() }
-                        }
-                    ))
-                    .toggleStyle(ModernToggleStyle())
-                    .scaleEffect(1.1)
                 }
             }
             .padding(20)
