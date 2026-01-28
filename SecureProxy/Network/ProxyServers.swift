@@ -1,6 +1,7 @@
-// SOCKS5Server.swift
-// 使用连接池的 SOCKS5 服务器
-// ✅ 模拟 client.js 的稳定实现
+// ProxyServers.swift
+// 修复版 - 改进连接生命周期管理
+// ✅ 确保连接总是被正确释放
+// ✅ 改进错误处理
 
 import Foundation
 import Network
@@ -318,6 +319,9 @@ actor ProxyConnection {
     private var bytesSent: Int64 = 0
     private var bytesReceived: Int64 = 0
     
+    // ✅ 新增：标记连接是否已释放
+    private var wsReleased = false
+    
     init(
         id: UUID,
         clientConnection: NWConnection,
@@ -397,7 +401,7 @@ actor ProxyConnection {
         onLog("🔗 [\(id.uuidString.prefix(6))] 连接: \(host):\(port)")
         
         do {
-            // 从池中获取连接
+            // 获取新连接
             let websocket = try await connectionManager.acquire()
             ws = websocket
             
@@ -422,10 +426,23 @@ actor ProxyConnection {
         isForwarding = true
         
         // 创建双向转发任务
-        async let clientToRemote: Void = forwardClientToRemote(ws: ws)
-        async let remoteToClient: Void = forwardRemoteToClient(ws: ws)
-        
-        _ = await (clientToRemote, remoteToClient)
+        await withTaskGroup(of: Void.self) { group in
+            // 客户端 -> 远程
+            group.addTask {
+                await self.forwardClientToRemote(ws: ws)
+            }
+            
+            // 远程 -> 客户端
+            group.addTask {
+                await self.forwardRemoteToClient(ws: ws)
+            }
+            
+            // 等待任意一个方向结束
+            await group.next()
+            
+            // 取消另一个方向
+            group.cancelAll()
+        }
         
         isForwarding = false
         
@@ -490,7 +507,9 @@ actor ProxyConnection {
         
         clientConnection.cancel()
         
-        if let ws = ws {
+        // ✅ 确保只释放一次
+        if let ws = ws, !wsReleased {
+            wsReleased = true
             await connectionManager.release(ws)
             self.ws = nil
         }

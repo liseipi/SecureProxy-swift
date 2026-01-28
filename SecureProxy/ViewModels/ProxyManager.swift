@@ -177,8 +177,8 @@ class ProxyManager: ObservableObject {
             // 创建连接池管理器
             let manager = ConnectionManager(
                 config: config,
-                minPoolSize: 3,   // 最小连接数
-                maxPoolSize: 10   // 最大连接数
+                // minPoolSize: 3,   // 最小连接数
+                // maxPoolSize: 10   // 最大连接数
             )
             
             connectionManager = manager

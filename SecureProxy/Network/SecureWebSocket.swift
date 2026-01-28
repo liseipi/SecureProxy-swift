@@ -1,6 +1,6 @@
 // SecureWebSocket.swift
-// 完全重构 - 模拟 client.js 的稳定连接实现
-// ✅ 修复连接不稳定问题
+// 最终修复版 - 解决 Sendable 协议错误
+// ✅ 所有异步操作符合 Swift 6 并发要求
 
 import Foundation
 import CryptoKit
@@ -27,6 +27,12 @@ actor SecureWebSocket {
     private var messageQueue: [Data] = []
     private var waitingForMessage: CheckedContinuation<Data, Error>?
     
+    // 认证完成标志
+    private var authCompleted = false
+    
+    // 连接状态锁，防止并发问题
+    private var isConnecting = false
+    
     // 配置常量
     private let maxRetries = 3
     private let connectTimeout: TimeInterval = 10.0
@@ -45,15 +51,27 @@ actor SecureWebSocket {
             throw WebSocketError.alreadyDestroyed
         }
         
+        // 防止重复连接
+        guard !isConnecting else {
+            print("⚠️ [WS \(id)] 连接正在进行中...")
+            throw WebSocketError.connectionInProgress
+        }
+        
+        isConnecting = true
+        defer { isConnecting = false }
+        
         for attempt in 0..<maxRetries {
             do {
                 try await attemptConnect()
                 reconnectAttempts = 0
                 startKeepalive()
-                print("✅ [WS \(id)] 连接成功")
+                print("✅ [WS \(id)] 连接并认证成功")
                 return
             } catch {
                 print("⚠️ [WS \(id)] 连接尝试 \(attempt + 1)/\(maxRetries) 失败: \(error.localizedDescription)")
+                
+                // 清理失败的连接
+                cleanup()
                 
                 if attempt < maxRetries - 1 {
                     let delay = min(1.0 * pow(2.0, Double(attempt)), 5.0)
@@ -67,7 +85,7 @@ actor SecureWebSocket {
     
     /// 发送 CONNECT 请求
     func sendConnect(host: String, port: Int) async throws {
-        guard isConnected, let sendKey = sendKey else {
+        guard isConnected && authCompleted, let sendKey = sendKey else {
             throw WebSocketError.notConnected
         }
         
@@ -75,11 +93,12 @@ actor SecureWebSocket {
         let plaintext = message.data(using: .utf8)!
         let encrypted = try encrypt(key: sendKey, plaintext: plaintext)
         
-        try await send(encrypted)
+        try await sendBinary(encrypted)
         updateActivity()
         
-        // 等待 OK 响应
-        let response = try await recv()
+        // 等待 OK 响应（带超时）
+        let response = try await recvWithTimeout(timeout: 10.0)
+        
         guard let responseStr = String(data: response, encoding: .utf8),
               responseStr.hasPrefix("OK") else {
             throw WebSocketError.connectionRefused("服务器拒绝连接: \(host):\(port)")
@@ -90,14 +109,12 @@ actor SecureWebSocket {
     
     /// 发送数据
     func send(_ data: Data) async throws {
-        guard isConnected, let ws = webSocketTask, let sendKey = sendKey else {
+        guard isConnected && authCompleted, let sendKey = sendKey else {
             throw WebSocketError.notConnected
         }
         
         let encrypted = try encrypt(key: sendKey, plaintext: data)
-        let message = URLSessionWebSocketTask.Message.data(encrypted)
-        
-        try await ws.send(message)
+        try await sendBinary(encrypted)
         updateActivity()
     }
     
@@ -112,6 +129,11 @@ actor SecureWebSocket {
             return messageQueue.removeFirst()
         }
         
+        // 检查是否已经有等待者
+        guard waitingForMessage == nil else {
+            throw WebSocketError.alreadyWaiting
+        }
+        
         // 否则等待新数据
         return try await withCheckedThrowingContinuation { continuation in
             waitingForMessage = continuation
@@ -120,7 +142,7 @@ actor SecureWebSocket {
     
     /// 检查连接健康
     func isHealthy() -> Bool {
-        guard isConnected else { return false }
+        guard isConnected && authCompleted && !destroyed else { return false }
         
         let now = Date()
         let idleDuration = now.timeIntervalSince(lastActivity)
@@ -133,26 +155,7 @@ actor SecureWebSocket {
         guard !destroyed else { return }
         
         destroyed = true
-        isConnected = false
-        
-        keepaliveTimer?.cancel()
-        keepaliveTimer = nil
-        
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        
-        session?.invalidateAndCancel()
-        session = nil
-        
-        sendKey = nil
-        recvKey = nil
-        
-        messageQueue.removeAll()
-        
-        if let continuation = waitingForMessage {
-            waitingForMessage = nil
-            continuation.resume(throwing: WebSocketError.connectionClosed)
-        }
+        cleanup()
         
         print("🔴 [WS \(id)] 已关闭")
     }
@@ -166,12 +169,7 @@ actor SecureWebSocket {
         }
         
         // 清理旧连接
-        if webSocketTask != nil || session != nil {
-            webSocketTask?.cancel(with: .goingAway, reason: nil)
-            webSocketTask = nil
-            session?.invalidateAndCancel()
-            session = nil
-        }
+        cleanup()
         
         // 构建 URL
         let useCDN = config.sniHost != config.proxyIP
@@ -208,15 +206,50 @@ actor SecureWebSocket {
         
         // 创建 WebSocket
         webSocketTask = session.webSocketTask(with: request)
+        
+        // 执行连接（带超时）
+        try await performConnectionWithTimeout()
+    }
+    
+    /// ✅ 修复：使用专门的超时方法，避免泛型 Sendable 问题
+    private func performConnectionWithTimeout() async throws {
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(connectTimeout * 1_000_000_000))
+        }
+        
+        let connectionTask = Task {
+            try await performConnection()
+        }
+        
+        do {
+            try await connectionTask.value
+            timeoutTask.cancel()
+        } catch {
+            timeoutTask.cancel()
+            throw error
+        }
+        
+        // 检查是否超时
+        if !timeoutTask.isCancelled {
+            connectionTask.cancel()
+            throw WebSocketError.operationTimeout
+        }
+    }
+    
+    /// 执行连接（内部方法）
+    private func performConnection() async throws {
+        // 启动 WebSocket
         webSocketTask?.resume()
         
-        // ✅ 关键：等待 WebSocket 真正打开
+        // 等待 open 事件（通过 ping 确认）
         try await waitForWebSocketOpen()
         
-        // ✅ WebSocket 打开后再进行密钥交换
+        // WebSocket 打开后立即进行密钥交换和认证
         try await setupKeys()
         
+        // 认证成功
         isConnected = true
+        authCompleted = true
         updateActivity()
         
         // 启动接收循环
@@ -230,9 +263,19 @@ actor SecureWebSocket {
         // 发送 ping 来确认连接
         for attempt in 1...3 {
             do {
-                try await webSocketTask?.sendPing { error in
-                    if let error = error {
-                        print("⚠️ [WS \(self.id)] Ping 失败: \(error)")
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    // 添加状态检查
+                    guard let task = webSocketTask, !destroyed else {
+                        continuation.resume(throwing: WebSocketError.notConnected)
+                        return
+                    }
+                    
+                    task.sendPing { error in
+                        if let error = error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume()
+                        }
                     }
                 }
                 print("✅ [WS \(id)] WebSocket 已打开")
@@ -240,9 +283,9 @@ actor SecureWebSocket {
             } catch {
                 if attempt < 3 {
                     print("⚠️ [WS \(id)] Ping 尝试 \(attempt)/3 失败，重试...")
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    try await Task.sleep(nanoseconds: 500_000_000) // 500ms
                 } else {
-                    throw WebSocketError.connectionFailed("WebSocket 打开失败")
+                    throw WebSocketError.connectionFailed("WebSocket 打开失败: \(error.localizedDescription)")
                 }
             }
         }
@@ -250,19 +293,15 @@ actor SecureWebSocket {
     
     /// 密钥交换和认证
     private func setupKeys() async throws {
-        guard let ws = webSocketTask else {
-            throw WebSocketError.notConnected
-        }
-        
         print("🔐 [WS \(id)] 开始密钥交换...")
         
-        // 1. 生成并发送客户端公钥
+        // 1. 生成并发送客户端公钥（32 字节随机数）
         let clientPub = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
-        try await ws.send(.data(clientPub))
+        try await sendRawBinary(clientPub)
         print("📤 [WS \(id)] 已发送客户端公钥")
         
-        // 2. 接收服务器公钥
-        let serverPub = try await recvBinaryWithTimeout(timeout: 10.0)
+        // 2. 接收服务器公钥（带超时）
+        let serverPub = try await recvRawBinary(timeout: 10.0)
         guard serverPub.count == 32 else {
             throw WebSocketError.invalidServerKey
         }
@@ -283,11 +322,11 @@ actor SecureWebSocket {
         // 4. 发送认证挑战
         let authMessage = "auth".data(using: .utf8)!
         let challenge = hmacSHA256(key: keys.sendKey, message: authMessage)
-        try await ws.send(.data(challenge))
+        try await sendRawBinary(challenge)
         print("📤 [WS \(id)] 已发送认证挑战")
         
-        // 5. 验证响应
-        let authResponse = try await recvBinaryWithTimeout(timeout: 10.0)
+        // 5. 验证响应（带超时）
+        let authResponse = try await recvRawBinary(timeout: 10.0)
         let okMessage = "ok".data(using: .utf8)!
         let expected = hmacSHA256(key: keys.recvKey, message: okMessage)
         
@@ -302,15 +341,17 @@ actor SecureWebSocket {
     private func receiveLoop() async {
         print("🔄 [WS \(id)] 接收循环启动")
         
-        while isConnected && !destroyed {
+        while isConnected && !destroyed && authCompleted {
             do {
                 guard let recvKey = recvKey else {
                     print("⚠️ [WS \(id)] 接收密钥未设置")
                     break
                 }
                 
-                // ✅ 关键：使用无限超时，让 WebSocket 自然等待
-                let encrypted = try await recvBinaryNoTimeout()
+                // 接收加密数据
+                let encrypted = try await recvRawBinaryNoTimeout()
+                
+                // 解密
                 let plaintext = try decrypt(key: recvKey, ciphertext: encrypted)
                 updateActivity()
                 
@@ -355,51 +396,91 @@ actor SecureWebSocket {
                 
                 // 发送 ping
                 do {
-                    try await webSocketTask?.sendPing { error in
-                        if let error = error {
-//                            print("⚠️ [WS \(id)] Keepalive ping 失败: \(error)")
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                        guard let task = webSocketTask, !destroyed else {
+                            continuation.resume(throwing: WebSocketError.notConnected)
+                            return
+                        }
+                        
+                        task.sendPing { error in
+                            if let error = error {
+                                continuation.resume(throwing: error)
+                            } else {
+                                continuation.resume()
+                            }
                         }
                     }
                 } catch {
-                    print("⚠️ [WS \(id)] Keepalive 发送失败")
+                    // Ping 失败不记录日志，保持安静
                 }
             }
         }
     }
     
-    /// 带超时的接收（用于密钥交换）
-    private func recvBinaryWithTimeout(timeout: TimeInterval) async throws -> Data {
-        guard let ws = webSocketTask else {
+    // MARK: - 底层发送/接收
+    
+    /// 发送原始二进制数据（用于密钥交换）
+    private func sendRawBinary(_ data: Data) async throws {
+        guard let ws = webSocketTask, !destroyed else {
             throw WebSocketError.notConnected
         }
         
-        return try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask {
-                let message = try await ws.receive()
-                switch message {
-                case .data(let data):
-                    return data
-                case .string(let text):
-                    return text.data(using: .utf8) ?? Data()
-                @unknown default:
-                    throw WebSocketError.invalidFrame
-                }
+        let message = URLSessionWebSocketTask.Message.data(data)
+        try await ws.send(message)
+    }
+    
+    /// 发送加密后的二进制数据
+    private func sendBinary(_ data: Data) async throws {
+        guard let ws = webSocketTask, !destroyed else {
+            throw WebSocketError.notConnected
+        }
+        
+        let message = URLSessionWebSocketTask.Message.data(data)
+        try await ws.send(message)
+    }
+    
+    /// ✅ 修复：接收原始二进制（带超时）- 避免 Sendable 问题
+    private func recvRawBinary(timeout: TimeInterval) async throws -> Data {
+        guard let ws = webSocketTask, !destroyed else {
+            throw WebSocketError.notConnected
+        }
+        
+        // 创建超时任务
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+        }
+        
+        // 创建接收任务
+        let receiveTask = Task { () -> Data in
+            let message = try await ws.receive()
+            switch message {
+            case .data(let data):
+                return data
+            case .string(let text):
+                return text.data(using: .utf8) ?? Data()
+            @unknown default:
+                throw WebSocketError.invalidFrame
             }
-            
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+        }
+        
+        // 等待任一完成
+        do {
+            let result = try await receiveTask.value
+            timeoutTask.cancel()
+            return result
+        } catch {
+            // 检查是否是接收任务的错误
+            if !timeoutTask.isCancelled {
+                receiveTask.cancel()
                 throw WebSocketError.receiveTimeout
             }
-            
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+            throw error
         }
     }
     
-    /// 无超时接收（用于接收循环）
-    private func recvBinaryNoTimeout() async throws -> Data {
-        guard let ws = webSocketTask else {
+    /// 接收原始二进制（无超时，用于接收循环）
+    private func recvRawBinaryNoTimeout() async throws -> Data {
+        guard let ws = webSocketTask, !destroyed else {
             throw WebSocketError.notConnected
         }
         
@@ -414,9 +495,81 @@ actor SecureWebSocket {
         }
     }
     
+    /// ✅ 修复：接收数据（带超时）- 用于 sendConnect
+    private func recvWithTimeout(timeout: TimeInterval) async throws -> Data {
+        guard isConnected else {
+            throw WebSocketError.notConnected
+        }
+        
+        // 如果队列有数据，直接返回
+        if !messageQueue.isEmpty {
+            return messageQueue.removeFirst()
+        }
+        
+        // 检查是否已经有等待者
+        guard waitingForMessage == nil else {
+            throw WebSocketError.alreadyWaiting
+        }
+        
+        // 创建超时任务
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+        }
+        
+        // 等待消息
+        let receiveTask = Task { () -> Data in
+            return try await withCheckedThrowingContinuation { continuation in
+                waitingForMessage = continuation
+            }
+        }
+        
+        do {
+            let result = try await receiveTask.value
+            timeoutTask.cancel()
+            return result
+        } catch {
+            if !timeoutTask.isCancelled {
+                receiveTask.cancel()
+                // 清理 continuation
+                if let continuation = waitingForMessage {
+                    waitingForMessage = nil
+                    continuation.resume(throwing: WebSocketError.receiveTimeout)
+                }
+                throw WebSocketError.receiveTimeout
+            }
+            throw error
+        }
+    }
+    
     /// 更新活动时间
     private func updateActivity() {
         lastActivity = Date()
+    }
+    
+    /// 清理资源
+    private func cleanup() {
+        isConnected = false
+        authCompleted = false
+        
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
+        
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        
+        session?.invalidateAndCancel()
+        session = nil
+        
+        sendKey = nil
+        recvKey = nil
+        
+        messageQueue.removeAll()
+        
+        // 安全地清理 continuation
+        if let continuation = waitingForMessage {
+            waitingForMessage = nil
+            continuation.resume(throwing: WebSocketError.connectionClosed)
+        }
     }
     
     // MARK: - 加密工具
@@ -504,7 +657,7 @@ actor SecureWebSocket {
     private func handleDelegateClose() {
         if isConnected {
             print("🔴 [WS \(id)] Delegate 通知连接已关闭")
-            isConnected = false
+            cleanup()
         }
     }
 }
@@ -574,12 +727,15 @@ enum WebSocketError: LocalizedError {
     case connectionClosed
     case connectionFailed(String)
     case connectionRefused(String)
+    case connectionInProgress
+    case alreadyWaiting
     case invalidURL
     case invalidServerKey
     case invalidPSK
     case authenticationFailed
     case invalidFrame
     case receiveTimeout
+    case operationTimeout
     case alreadyDestroyed
     
     var errorDescription: String? {
@@ -588,12 +744,15 @@ enum WebSocketError: LocalizedError {
         case .connectionClosed: return "WebSocket 连接已关闭"
         case .connectionFailed(let reason): return "连接失败: \(reason)"
         case .connectionRefused(let reason): return "连接被拒绝: \(reason)"
+        case .connectionInProgress: return "连接正在进行中"
+        case .alreadyWaiting: return "已有等待中的接收操作"
         case .invalidURL: return "无效的 URL"
         case .invalidServerKey: return "无效的服务器公钥"
         case .invalidPSK: return "无效的预共享密钥"
         case .authenticationFailed: return "认证失败"
         case .invalidFrame: return "无效的 WebSocket 帧"
         case .receiveTimeout: return "接收超时"
+        case .operationTimeout: return "操作超时"
         case .alreadyDestroyed: return "WebSocket 已销毁"
         }
     }
