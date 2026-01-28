@@ -1,7 +1,5 @@
 // ProxyServers.swift
-// 修复版 - 改进连接生命周期管理
-// ✅ 确保连接总是被正确释放
-// ✅ 改进错误处理
+// 简化日志版本 - 只保留关键信息
 
 import Foundation
 import Network
@@ -46,7 +44,7 @@ actor SOCKS5Server {
         }
         
         listener?.start(queue: .global())
-        onLog("✅ SOCKS5 服务器启动: 127.0.0.1:\(port)")
+        // 简化：启动时不输出，由 ProxyManager 统一输出
     }
     
     func stop() {
@@ -60,15 +58,15 @@ actor SOCKS5Server {
         }
         connections.removeAll()
         
-        onLog("🛑 SOCKS5 服务器已停止")
+        // 简化：停止时不输出
     }
     
     private func handleListenerState(_ state: NWListener.State) {
         switch state {
         case .ready:
-            onLog("📡 SOCKS5 监听就绪")
+            break  // 静默
         case .failed(let error):
-            onLog("❌ SOCKS5 监听失败: \(error)")
+            onLog("❌ SOCKS5: \(error.localizedDescription)")
         default:
             break
         }
@@ -89,7 +87,7 @@ actor SOCKS5Server {
         do {
             try await handleSOCKS5(connection: connection)
         } catch {
-            // 错误已记录
+            // 错误由 connection 内部处理
         }
         
         await connection.close()
@@ -204,7 +202,7 @@ actor HTTPProxyServer {
         }
         
         listener?.start(queue: .global())
-        onLog("✅ HTTP 代理服务器启动: 127.0.0.1:\(port)")
+        // 简化：启动时不输出
     }
     
     func stop() {
@@ -218,15 +216,15 @@ actor HTTPProxyServer {
         }
         connections.removeAll()
         
-        onLog("🛑 HTTP 代理服务器已停止")
+        // 简化：停止时不输出
     }
     
     private func handleListenerState(_ state: NWListener.State) {
         switch state {
         case .ready:
-            onLog("📡 HTTP 监听就绪")
+            break  // 静默
         case .failed(let error):
-            onLog("❌ HTTP 监听失败: \(error)")
+            onLog("❌ HTTP: \(error.localizedDescription)")
         default:
             break
         }
@@ -247,7 +245,7 @@ actor HTTPProxyServer {
         do {
             try await handleHTTPConnect(connection: connection)
         } catch {
-            // 错误已记录
+            // 错误由 connection 内部处理
         }
         
         await connection.close()
@@ -319,7 +317,6 @@ actor ProxyConnection {
     private var bytesSent: Int64 = 0
     private var bytesReceived: Int64 = 0
     
-    // ✅ 新增：标记连接是否已释放
     private var wsReleased = false
     
     init(
@@ -398,19 +395,18 @@ actor ProxyConnection {
     // MARK: - Remote Connection
     
     func connectToRemote(host: String, port: Int) async throws {
-        onLog("🔗 [\(id.uuidString.prefix(6))] 连接: \(host):\(port)")
+        // 简化：只输出目标，移除 UUID
+        onLog("🔗 \(host):\(port)")
         
         do {
-            // 获取新连接
             let websocket = try await connectionManager.acquire()
             ws = websocket
             
-            // 发送 CONNECT
             try await websocket.sendConnect(host: host, port: port)
             
-            onLog("✅ [\(id.uuidString.prefix(6))] 已连接")
+            // 成功不输出，只在失败时输出
         } catch {
-            onLog("❌ [\(id.uuidString.prefix(6))] 连接失败: \(error.localizedDescription)")
+            onLog("❌ \(host):\(port) - \(error.localizedDescription)")
             throw error
         }
     }
@@ -418,38 +414,30 @@ actor ProxyConnection {
     // MARK: - Forwarding
     
     func startForwarding() async {
-        guard let ws = ws else {
-            onLog("⚠️ [\(id.uuidString.prefix(6))] 没有 WebSocket，无法转发")
-            return
-        }
+        guard let ws = ws else { return }
         
         isForwarding = true
         
-        // 创建双向转发任务
         await withTaskGroup(of: Void.self) { group in
-            // 客户端 -> 远程
             group.addTask {
                 await self.forwardClientToRemote(ws: ws)
             }
             
-            // 远程 -> 客户端
             group.addTask {
                 await self.forwardRemoteToClient(ws: ws)
             }
             
-            // 等待任意一个方向结束
             await group.next()
-            
-            // 取消另一个方向
             group.cancelAll()
         }
         
         isForwarding = false
         
+        // 简化：只输出有流量的连接统计，且格式更简洁
         if bytesSent > 0 || bytesReceived > 0 {
             let sentMB = Double(bytesSent) / 1024 / 1024
             let recvMB = Double(bytesReceived) / 1024 / 1024
-            onLog(String(format: "📊 [\(id.uuidString.prefix(6))] 上传: %.2f MB, 下载: %.2f MB", sentMB, recvMB))
+            onLog(String(format: "📊 ↑%.2fMB ↓%.2fMB", sentMB, recvMB))
         }
     }
     
@@ -507,7 +495,6 @@ actor ProxyConnection {
         
         clientConnection.cancel()
         
-        // ✅ 确保只释放一次
         if let ws = ws, !wsReleased {
             wsReleased = true
             await connectionManager.release(ws)

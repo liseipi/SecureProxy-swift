@@ -1,7 +1,5 @@
 // ConnectionManager.swift
-// 简化版连接管理器 - 完全模拟 client.js 实现
-// ✅ 不使用连接池，每次创建新连接
-// ✅ 避免连接复用导致的状态混乱
+// 简化日志版本 - 移除冗余输出
 
 import Foundation
 
@@ -23,8 +21,7 @@ actor ConnectionManager {
     
     /// 预热（空操作，因为不使用连接池）
     func warmup() async throws {
-        print("ℹ️  [Manager] 使用按需连接模式（无连接池）")
-        print("ℹ️  [Manager] 每个请求创建独立连接")
+        // 静默，无输出
     }
     
     // MARK: - 连接获取和释放
@@ -34,7 +31,7 @@ actor ConnectionManager {
         totalAcquired += 1
         activeConnections += 1
         
-        print("🆕 [Manager] 创建新连接 (活跃: \(activeConnections))")
+        // 移除日志：每次创建连接都输出太多了
         
         let ws = SecureWebSocket(config: config)
         
@@ -44,7 +41,8 @@ actor ConnectionManager {
             return ws
         } catch {
             activeConnections -= 1
-            print("❌ [Manager] 创建连接失败: \(error.localizedDescription)")
+            // 只在失败时输出
+            print("❌ 连接失败: \(error.localizedDescription)")
             throw error
         }
     }
@@ -56,7 +54,7 @@ actor ConnectionManager {
         
         Task {
             await ws.close()
-            print("🗑️  [Manager] 关闭连接 (活跃: \(activeConnections))")
+            // 移除日志：太频繁
         }
     }
     
@@ -64,12 +62,12 @@ actor ConnectionManager {
     
     /// 清理（空操作，因为没有池）
     func cleanup() async {
-        print("✅ [Manager] 清理完成")
+        // 静默
     }
     
     /// 重建（空操作）
     func rebuild() async throws {
-        print("ℹ️  [Manager] 按需连接模式无需重建")
+        // 静默
     }
     
     // MARK: - 统计
@@ -79,6 +77,7 @@ actor ConnectionManager {
     }
     
     func printStats() {
-        print("📊 [Manager] 活跃连接: \(activeConnections), 总获取: \(totalAcquired), 总释放: \(totalReleased), 总创建: \(totalCreated)")
+        // 只在真正需要时才调用，不自动输出
+        print("📊 活跃: \(activeConnections), 获取: \(totalAcquired), 释放: \(totalReleased), 创建: \(totalCreated)")
     }
 }

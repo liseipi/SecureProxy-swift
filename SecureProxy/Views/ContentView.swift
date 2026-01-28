@@ -1,23 +1,28 @@
 // ContentView.swift
-// 美化版本 - 现代化设计
-// ✅ 已更新为使用 ProxyManager
+// 修复版本：
+// 1. 修复暗色主题文字不显示问题
+// 2. 使用系统自适应颜色替代硬编码颜色
 
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject var manager: ProxyManager  // ✅ 修改类型
+    @EnvironmentObject var manager: ProxyManager
     @State private var showingConfigEditor = false
     @State private var editingConfig: ProxyConfig? = nil
     @State private var showingURLImport = false
     @State private var importURLString = ""
     @State private var hoveredConfigId: UUID? = nil
     @Environment(\.openWindow) var openWindow
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增：检测当前主题
     
     var body: some View {
         ZStack {
-            // 背景渐变
+            // ✅ 修复：背景渐变使用自适应颜色
             LinearGradient(
-                colors: [
+                colors: colorScheme == .dark ? [
+                    Color(white: 0.12),
+                    Color(white: 0.15)
+                ] : [
                     Color(red: 0.95, green: 0.96, blue: 0.98),
                     Color(red: 0.98, green: 0.99, blue: 1.0)
                 ],
@@ -128,8 +133,9 @@ struct ContentView: View {
 // MARK: - Modern Status Bar
 
 struct ModernStatusBar: View {
-    @ObservedObject var manager: ProxyManager  // ✅ 修改类型
+    @ObservedObject var manager: ProxyManager
     let openWindow: (String) -> Void
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增
     
     var body: some View {
         VStack(spacing: 0) {
@@ -138,10 +144,10 @@ struct ModernStatusBar: View {
                 // 左侧：配置信息
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
-                        // 配置名称
+                        // 配置名称 - ✅ 使用自适应颜色
                         Text(manager.activeConfig?.name ?? "未选择配置")
                             .font(.system(size: 20, weight: .bold, design: .rounded))
-                            .foregroundColor(.primary)
+                            .foregroundColor(.primary)  // ✅ 自适应
                         
                         // 状态指示器
                         StatusPill(status: manager.status)
@@ -152,7 +158,7 @@ struct ModernStatusBar: View {
                         HStack(spacing: 12) {
                             Label(config.sniHost, systemImage: "network")
                                 .font(.system(size: 12))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.secondary)  // ✅ 自适应
                             
                             if config.sniHost != config.proxyIP {
                                 Label("CDN", systemImage: "server.rack")
@@ -227,8 +233,9 @@ struct ModernStatusBar: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 0)
-                .fill(Color.white.opacity(0.8))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 2)
+                // ✅ 修复：使用自适应背景色
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.95))
+                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.3 : 0.05), radius: 10, x: 0, y: 2)
         )
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: manager.isRunning)
     }
@@ -269,6 +276,7 @@ struct TrafficStatsCard: View {
     let uploadSpeed: Double
     let downloadSpeed: Double
     let config: ProxyConfig?
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增
     
     var body: some View {
         HStack(spacing: 20) {
@@ -304,17 +312,9 @@ struct TrafficStatsCard: View {
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.9),
-                            Color.white.opacity(0.7)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
+                // ✅ 修复：使用自适应背景
+                .fill(Color(NSColor.controlBackgroundColor).opacity(colorScheme == .dark ? 0.5 : 0.9))
+                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.3 : 0.05), radius: 8, x: 0, y: 2)
         )
     }
 }
@@ -334,11 +334,11 @@ struct TrafficMetric: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
                 
                 Text(formatSpeed(value))
                     .font(.system(size: 16, weight: .medium, design: .rounded))
-                    .foregroundColor(.primary)
+                    .foregroundColor(.primary)  // ✅ 自适应
             }
         }
     }
@@ -367,7 +367,7 @@ struct PortBadge: View {
             
             Text("\(port)")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(.primary)
+                .foregroundColor(.primary)  // ✅ 自适应
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -389,16 +389,16 @@ struct ModernConfigCard: View {
     let onCopyURL: () -> Void
     
     @State private var showingDeleteAlert = false
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 顶部：名称和状态
             HStack(spacing: 12) {
-                // 名称
                 HStack(spacing: 8) {
                     Text(config.name)
                         .font(.system(size: 17, weight: .bold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.primary)  // ✅ 自适应
                     
                     if isActive {
                         Image(systemName: "checkmark.seal.fill")
@@ -409,7 +409,6 @@ struct ModernConfigCard: View {
                 
                 Spacer()
                 
-                // 操作按钮（悬停时显示）
                 if isHovered || isActive {
                     HStack(spacing: 8) {
                         ActionButton(icon: "link.circle.fill", color: .purple, action: onCopyURL)
@@ -427,7 +426,6 @@ struct ModernConfigCard: View {
             
             // 中部：服务器信息
             VStack(alignment: .leading, spacing: 10) {
-                // SNI Host
                 InfoRow(
                     icon: "network",
                     label: "服务器",
@@ -435,7 +433,6 @@ struct ModernConfigCard: View {
                     color: .blue
                 )
                 
-                // 代理模式
                 if config.sniHost == config.proxyIP {
                     InfoRow(
                         icon: "checkmark.circle.fill",
@@ -466,15 +463,16 @@ struct ModernConfigCard: View {
                 
                 Text(":\(config.serverPort)")
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
             }
             .padding(16)
         }
         .background(
             RoundedRectangle(cornerRadius: 16)
-                .fill(Color.white)
+                // ✅ 修复：使用自适应背景
+                .fill(Color(NSColor.controlBackgroundColor))
                 .shadow(
-                    color: isActive ? Color.blue.opacity(0.2) : Color.black.opacity(isHovered ? 0.1 : 0.05),
+                    color: isActive ? Color.blue.opacity(0.2) : Color.black.opacity(colorScheme == .dark ? (isHovered ? 0.4 : 0.2) : (isHovered ? 0.1 : 0.05)),
                     radius: isActive ? 12 : (isHovered ? 8 : 4),
                     x: 0,
                     y: isActive ? 4 : 2
@@ -550,12 +548,12 @@ struct InfoRow: View {
             
             Text(label)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.secondary)
+                .foregroundColor(.secondary)  // ✅ 自适应
                 .frame(width: 50, alignment: .leading)
             
             Text(value)
                 .font(.system(size: 13))
-                .foregroundColor(.primary)
+                .foregroundColor(.primary)  // ✅ 自适应
                 .lineLimit(1)
         }
     }
@@ -574,11 +572,11 @@ struct PortInfo: View {
             
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
+                .foregroundColor(.secondary)  // ✅ 自适应
             
             Text("\(port)")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(.primary)
+                .foregroundColor(.primary)  // ✅ 自适应
         }
     }
 }
@@ -608,18 +606,18 @@ struct ModernEmptyStateView: View {
                 
                 Image(systemName: "tray")
                     .font(.system(size: 50, weight: .light))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
             }
             
             // 文字
             VStack(spacing: 8) {
                 Text("还没有配置")
                     .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(.primary)  // ✅ 自适应
                 
                 Text("添加或导入配置以开始使用")
                     .font(.system(size: 15))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
             }
             
             // 按钮
@@ -714,6 +712,7 @@ struct ModernToolbar: View {
     let onImportClipboard: () -> Void
     let onImportFile: () -> Void
     let onExportAll: () -> Void
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增
     
     var body: some View {
         HStack(spacing: 16) {
@@ -793,18 +792,20 @@ struct ModernToolbar: View {
                 Text("共 \(configCount) 个配置")
             }
             .font(.system(size: 12, weight: .medium))
-            .foregroundColor(.secondary)
+            .foregroundColor(.secondary)  // ✅ 自适应
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.5))
+            // ✅ 修复：使用自适应背景
+            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
             .cornerRadius(8)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
         .background(
             Rectangle()
-                .fill(Color.white.opacity(0.8))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: -2)
+                // ✅ 修复：使用自适应背景
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.95))
+                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.3 : 0.05), radius: 10, x: 0, y: -2)
         )
     }
 }
@@ -839,6 +840,7 @@ struct URLImportSheet: View {
     @Binding var urlString: String
     let onImport: () -> Void
     let onCancel: () -> Void
+    @Environment(\.colorScheme) var colorScheme  // ✅ 新增
     
     var body: some View {
         VStack(spacing: 20) {
@@ -846,16 +848,18 @@ struct URLImportSheet: View {
                 Text("粘贴链接导入配置")
                     .font(.title2)
                     .fontWeight(.bold)
+                    .foregroundColor(.primary)  // ✅ 自适应
                 Spacer()
             }
             
             VStack(alignment: .leading, spacing: 8) {
                 Text("粘贴配置链接")
                     .font(.headline)
+                    .foregroundColor(.primary)  // ✅ 自适应
                 
                 Text("格式: wss://host:port/path?psk=xxx&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
                 
                 TextEditor(text: $urlString)
                     .font(.system(.body, design: .monospaced))
@@ -889,13 +893,15 @@ struct URLImportSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("示例链接")
                     .font(.headline)
+                    .foregroundColor(.primary)  // ✅ 自适应
                 
                 Text("wss://example.com:443/ws?psk=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&socks=1080&http=1081&name=MyProxy&proxy_ip=1.1.1.1")
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary)  // ✅ 自适应
                     .textSelection(.enabled)
                     .padding(8)
-                    .background(Color.gray.opacity(0.1))
+                    // ✅ 修复：使用自适应背景
+                    .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                     .cornerRadius(4)
             }
             
@@ -917,6 +923,8 @@ struct URLImportSheet: View {
         }
         .padding()
         .frame(width: 600, height: 450)
+        // ✅ 修复：使用自适应背景
+        .background(Color(NSColor.windowBackgroundColor))
     }
 }
 
@@ -924,5 +932,5 @@ struct URLImportSheet: View {
 
 #Preview {
     ContentView()
-        .environmentObject(ProxyManager())  // ✅ 使用新类型
+        .environmentObject(ProxyManager())
 }

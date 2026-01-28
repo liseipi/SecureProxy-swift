@@ -1,6 +1,7 @@
 // ProxyManager.swift
-// 重构后的代理管理器 - 模拟 client.js 的稳定架构
-// ✅ 真正的连接池复用
+// 修复版本：
+// 1. 修复状态闪烁问题
+// 2. 移除不必要的状态更新
 
 import Foundation
 import Combine
@@ -42,25 +43,14 @@ class ProxyManager: ObservableObject {
         loadConfigs()
         startTrafficMonitor()
         
-        addLog("✅ ProxyManager 初始化完成")
-        addLog("🚀 使用连接池架构 v4.0 (模拟 client.js)")
-        addLog("ℹ️  真正的连接复用，稳定高效")
+        addLog("✅ 初始化完成")
     }
     
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             DispatchQueue.main.async {
-                if let error = error {
-                    print("⚠️ 通知权限: \(error.localizedDescription)")
-                    self?.notificationsEnabled = false
-                } else if granted {
-                    print("✅ 通知权限已授予")
-                    self?.notificationsEnabled = true
-                } else {
-                    print("ℹ️ 通知权限被拒绝")
-                    self?.notificationsEnabled = false
-                }
+                self?.notificationsEnabled = granted && error == nil
             }
         }
     }
@@ -70,7 +60,6 @@ class ProxyManager: ObservableObject {
     func loadConfigs() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: configDirectory, includingPropertiesForKeys: nil) else {
-            addLog("ℹ️ 配置目录为空")
             return
         }
         
@@ -84,7 +73,9 @@ class ProxyManager: ObservableObject {
                 return config
             }
         
-        addLog("📂 加载了 \(configs.count) 个配置")
+        if configs.count > 0 {
+            addLog("📂 加载 \(configs.count) 个配置")
+        }
         
         if let activeName = UserDefaults.standard.string(forKey: "activeConfig"),
            let active = configs.first(where: { $0.name == activeName }) {
@@ -103,7 +94,7 @@ class ProxyManager: ObservableObject {
         let url = configDirectory.appendingPathComponent("\(config.name).json")
         try? data.write(to: url)
         
-        addLog("💾 保存配置: \(config.name)")
+        addLog("💾 \(config.name)")
         loadConfigs()
     }
     
@@ -111,7 +102,7 @@ class ProxyManager: ObservableObject {
         let url = configDirectory.appendingPathComponent("\(config.name).json")
         try? FileManager.default.removeItem(at: url)
         
-        addLog("🗑️ 删除配置: \(config.name)")
+        addLog("🗑️ 删除 \(config.name)")
         loadConfigs()
     }
     
@@ -119,10 +110,10 @@ class ProxyManager: ObservableObject {
         activeConfig = config
         UserDefaults.standard.set(config.name, forKey: "activeConfig")
         
-        addLog("🔄 切换到配置: \(config.name)")
+        addLog("🔄 切换到 \(config.name)")
         
         if isRunning {
-            addLog("⚠️ 代理正在运行，将重启...")
+            addLog("⚠️ 重启代理...")
             stop()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.start()
@@ -133,30 +124,19 @@ class ProxyManager: ObservableObject {
     // MARK: - Proxy Control
     
     func start() {
-        guard !isStarting else {
-            addLog("⚠️ 代理正在启动中，请稍候...")
-            return
-        }
-        
-        guard !isRunning else {
-            addLog("⚠️ 代理已在运行")
-            return
-        }
+        guard !isStarting else { return }
+        guard !isRunning else { return }
         
         guard let config = activeConfig else {
-            addLog("❌ 错误: 没有选中的配置")
+            addLog("❌ 未选择配置")
             return
         }
         
         isStarting = true
         status = .connecting
-        addLog("🚀 准备启动代理（连接池模式）...")
-        addLog("📡 服务器: \(config.sniHost):\(config.serverPort)")
-        if config.sniHost != config.proxyIP {
-            addLog("🌐 CDN 模式: \(config.proxyIP)")
-        }
-        addLog("🔐 使用 AES-256-GCM 加密")
-        addLog("🌟 模拟 client.js 的稳定架构")
+        
+        let cdnMode = config.sniHost != config.proxyIP ? " (CDN)" : ""
+        addLog("🚀 启动: \(config.sniHost)\(cdnMode)")
         
         Task {
             await startProxyServers(config: config)
@@ -166,27 +146,18 @@ class ProxyManager: ObservableObject {
     @MainActor
     private func startProxyServers(config: ProxyConfig) async {
         do {
-            // 清理旧的连接管理器
+            // 清理旧连接管理器
             if let oldManager = connectionManager {
-                addLog("🧹 清理旧的连接管理器...")
                 await oldManager.cleanup()
                 connectionManager = nil
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             
-            // 创建连接池管理器
-            let manager = ConnectionManager(
-                config: config,
-                // minPoolSize: 3,   // 最小连接数
-                // maxPoolSize: 10   // 最大连接数
-            )
-            
+            let manager = ConnectionManager(config: config)
             connectionManager = manager
             
-            // 预热连接池
             try await manager.warmup()
             
-            // 启动 SOCKS5 服务器
             let socks = SOCKS5Server(
                 port: config.socksPort,
                 config: config,
@@ -201,7 +172,6 @@ class ProxyManager: ObservableObject {
             try await socks.start()
             socksServer = socks
             
-            // 启动 HTTP 服务器
             let http = HTTPProxyServer(
                 port: config.httpPort,
                 config: config,
@@ -216,24 +186,19 @@ class ProxyManager: ObservableObject {
             try await http.start()
             httpServer = http
             
-            // 更新状态
+            // ✅ 修复：确保状态只更新一次，避免闪烁
             self.isRunning = true
-            self.status = .connected
+            self.status = .connected  // 设置为已连接状态
             self.isStarting = false
             
-            self.addLog("✅ 代理服务启动成功（连接池模式）")
-            self.addLog("📡 SOCKS5: 127.0.0.1:\(config.socksPort)")
-            self.addLog("📡 HTTP: 127.0.0.1:\(config.httpPort)")
-            self.addLog("ℹ️  连接复用，性能稳定")
+            self.addLog("✅ 代理已启动 - SOCKS5:\(config.socksPort) HTTP:\(config.httpPort)")
             
             if notificationsEnabled {
                 self.showNotification(
                     title: "代理已启动",
-                    message: "连接池模式 - SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
+                    message: "SOCKS5: \(config.socksPort) | HTTP: \(config.httpPort)"
                 )
             }
-            
-            startStatsMonitor()
             
         } catch {
             self.addLog("❌ 启动失败: \(error.localizedDescription)")
@@ -249,18 +214,11 @@ class ProxyManager: ObservableObject {
     }
     
     func stop() {
-        guard !isStopping else {
-            addLog("⚠️ 代理正在停止中...")
-            return
-        }
-        
-        guard isRunning else {
-            addLog("ℹ️ 代理未运行")
-            return
-        }
+        guard !isStopping else { return }
+        guard isRunning else { return }
         
         isStopping = true
-        addLog("🛑 准备停止代理...")
+        addLog("🛑 停止代理...")
         
         Task {
             await stopProxyServers()
@@ -269,7 +227,6 @@ class ProxyManager: ObservableObject {
     
     @MainActor
     private func stopProxyServers() async {
-        // 1. 停止服务器
         if let socks = socksServer {
             await socks.stop()
             socksServer = nil
@@ -280,50 +237,48 @@ class ProxyManager: ObservableObject {
             httpServer = nil
         }
         
-        // 2. 清理连接管理器
         if let manager = connectionManager {
             await manager.cleanup()
             connectionManager = nil
         }
         
-        // 3. 停止统计监控
         statsTimer?.invalidate()
         statsTimer = nil
         
-        // 4. 更新状态
+        // ✅ 修复：确保状态只更新一次
         self.isRunning = false
         self.status = .disconnected
         self.isStopping = false
         self.trafficUp = 0
         self.trafficDown = 0
         
-        self.addLog("✅ 代理已完全停止")
+        self.addLog("✅ 已停止")
     }
     
     func rebuildConnectionPool() {
         guard let manager = connectionManager, isRunning else {
-            addLog("⚠️ 代理未运行，无法重建连接池")
+            addLog("⚠️ 代理未运行")
             return
         }
         
-        addLog("🔄 开始重建连接池...")
+        addLog("🔄 重建连接池...")
         
         Task {
             do {
                 try await manager.rebuild()
                 await MainActor.run {
-                    self.addLog("✅ 连接池重建成功")
+                    self.addLog("✅ 重建完成")
                 }
             } catch {
                 await MainActor.run {
-                    self.addLog("❌ 连接池重建失败: \(error.localizedDescription)")
+                    self.addLog("❌ 重建失败: \(error.localizedDescription)")
                 }
             }
         }
     }
     
     func forceCleanup() {
-        addLog("🧹 开始强制清理...")
+        addLog("🧹 强制清理...")
         stop()
         addLog("✅ 清理完成")
     }
@@ -331,26 +286,16 @@ class ProxyManager: ObservableObject {
     // MARK: - Traffic Monitor
     
     private func startTrafficMonitor() {
+        // ✅ 修复：使用 weak self 避免循环引用，并且只更新流量数据，不触发状态变化
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
-            DispatchQueue.main.async {
-                guard self.isRunning else { return }
-                
-                self.trafficUp = Double.random(in: 0...100)
-                self.trafficDown = Double.random(in: 0...100)
-            }
-        }
-    }
-    
-    private func startStatsMonitor() {
-        statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            
-            Task {
-                if let manager = await self.connectionManager {
-                    await manager.printStats()
+            // 只在运行时更新流量，不改变其他状态
+            if self.isRunning {
+                DispatchQueue.main.async {
+                    // 只更新流量数据，不触发其他状态变化
+                    self.trafficUp = Double.random(in: 0...100)
+                    self.trafficDown = Double.random(in: 0...100)
                 }
             }
         }
@@ -379,16 +324,16 @@ class ProxyManager: ObservableObject {
         pasteboard.clearContents()
         pasteboard.setString(urlString, forType: .string)
         
-        addLog("📋 已复制配置链接: \(config.name)")
+        addLog("📋 复制: \(config.name)")
         if notificationsEnabled {
-            showNotification(title: "复制成功", message: "配置链接已复制到剪贴板")
+            showNotification(title: "复制成功", message: "配置链接已复制")
         }
     }
     
     func importFromClipboard() {
         let pasteboard = NSPasteboard.general
         guard let urlString = pasteboard.string(forType: .string) else {
-            addLog("❌ 剪贴板中没有文本")
+            addLog("❌ 剪贴板为空")
             return
         }
         
@@ -397,7 +342,7 @@ class ProxyManager: ObservableObject {
     
     func importFromURLString(_ urlString: String) {
         guard let config = ProxyConfig.from(urlString: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            addLog("❌ 无效的配置链接格式")
+            addLog("❌ 无效链接")
             return
         }
         
@@ -410,9 +355,9 @@ class ProxyManager: ObservableObject {
         newConfig.id = UUID()
         saveConfig(newConfig)
         
-        addLog("✅ 成功导入配置: \(newConfig.name)")
+        addLog("✅ 导入: \(newConfig.name)")
         if notificationsEnabled {
-            showNotification(title: "导入成功", message: "配置 \(newConfig.name) 已导入")
+            showNotification(title: "导入成功", message: newConfig.name)
         }
     }
     
@@ -437,7 +382,7 @@ class ProxyManager: ObservableObject {
                 try data.write(to: url)
                 
                 DispatchQueue.main.async {
-                    self.addLog("✅ 配置已导出: \(config.name)")
+                    self.addLog("✅ 导出: \(config.name)")
                     if self.notificationsEnabled {
                         self.showNotification(title: "导出成功", message: "配置已保存")
                     }
@@ -452,7 +397,7 @@ class ProxyManager: ObservableObject {
     
     func exportAllConfigs() {
         guard !configs.isEmpty else {
-            addLog("⚠️ 没有可导出的配置")
+            addLog("⚠️ 无配置可导出")
             return
         }
         
@@ -472,9 +417,9 @@ class ProxyManager: ObservableObject {
                 try data.write(to: url)
                 
                 DispatchQueue.main.async {
-                    self.addLog("✅ 已导出 \(self.configs.count) 个配置")
+                    self.addLog("✅ 导出 \(self.configs.count) 个配置")
                     if self.notificationsEnabled {
-                        self.showNotification(title: "导出成功", message: "已导出 \(self.configs.count) 个配置")
+                        self.showNotification(title: "导出成功", message: "\(self.configs.count) 个配置")
                     }
                 }
             } catch {
@@ -505,7 +450,7 @@ class ProxyManager: ObservableObject {
                     self.importMultipleConfigs(configsArray)
                 } else {
                     throw NSError(domain: "ImportError", code: 1,
-                                userInfo: [NSLocalizedDescriptionKey: "无效的配置文件格式"])
+                                userInfo: [NSLocalizedDescriptionKey: "无效格式"])
                 }
                 
             } catch {
@@ -527,9 +472,9 @@ class ProxyManager: ObservableObject {
         saveConfig(newConfig)
         
         DispatchQueue.main.async {
-            self.addLog("✅ 成功导入配置: \(newConfig.name)")
+            self.addLog("✅ 导入: \(newConfig.name)")
             if self.notificationsEnabled {
-                self.showNotification(title: "导入成功", message: "配置 \(newConfig.name) 已导入")
+                self.showNotification(title: "导入成功", message: newConfig.name)
             }
         }
     }
@@ -550,9 +495,9 @@ class ProxyManager: ObservableObject {
         }
         
         DispatchQueue.main.async {
-            self.addLog("✅ 成功导入 \(importedCount) 个配置")
+            self.addLog("✅ 导入 \(importedCount) 个配置")
             if self.notificationsEnabled {
-                self.showNotification(title: "导入成功", message: "已导入 \(importedCount) 个配置")
+                self.showNotification(title: "导入成功", message: "\(importedCount) 个配置")
             }
         }
     }
